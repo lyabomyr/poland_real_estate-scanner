@@ -7,19 +7,33 @@ search:
 filters:
   # rejected if any of these appears in title/description/location (case-insensitive, word boundary)
   reject_keywords:
+    # social housing / regulated rent — you can't just "buy" one on the open market
     - "TBS"
     - "T.B.S"
+    # basement / below-ground level units
     - "suterena"
     - "półpiwnica"
     - "polpiwnica"
     - "poziom -1"
     - "piwnica mieszkalna"
+    # fractional ownership — bailiff auctions frequently sell 1/2, 1/6 etc. shares,
+    # we want a whole apartment, not a share of one
+    - "udział"
+    - "udzial"
+    - "współwłasnoś"      # "współwłasność" / "współwłasności"
+    - "wspolwlasnos"
 
 telegram:
   bot_token: "REPLACE_WITH_BOT_TOKEN"
   chat_id: ""                          # leave empty to auto-discover from getUpdates,
                                        # or set explicitly: "@your_channel", "582409029", "-100..."
   parse_mode: HTML
+
+notifications:
+  # If N+ new listings from the same source share the same "street, district",
+  # collapse them into one Telegram message instead of N separate ones.
+  # Common when a developer lists every unit in a new building.
+  min_group_size: 3
 
 storage:
   db_path: ./data/seen.db
@@ -44,12 +58,6 @@ sources:
     enabled: true
     url: "https://www.morizon.pl/mieszkania/najnowsze/krakow/?ps%5Bprice_to%5D=610000&ps%5Bliving_area_from%5D=39"
     pages: 2
-
-  # listaprzetargow.pl monitoring page is fully JS-rendered — SSR HTML is empty.
-  # Left disabled by default. Enable + add Playwright/headless if you really need it.
-  listaprzetargow:
-    enabled: false
-    url: "https://listaprzetargow.pl/monitoring-rynku?location=36992&facility_type=mieszkanie"
 
   # licytacje.komornik.pl — bailiff auctions (public forced-sale of properties).
   # Data lives in __NUXT_DATA__ on the search page (SSR), no headless browser needed.

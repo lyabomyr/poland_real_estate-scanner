@@ -1,3 +1,18 @@
+"""SQLite-backed dedup store keyed by ``<source>:<listing_id>``.
+
+Design notes
+------------
+* One table, one row per distinct listing. No history — a listing only ever
+  transitions "unseen → seen".
+* We store *both* matched and rejected listings so we don't re-evaluate them
+  every run (Otodom + OLX return the same ~180 items each 15-minute tick).
+* ``INSERT OR IGNORE`` makes ``add()`` idempotent — safe to call twice for the
+  same key without needing a pre-check.
+* File lives at ``storage.db_path`` (default ``./data/seen.db``). In GitHub
+  Actions the workflow commits it back to the repo so the next run picks up
+  where the previous one stopped.
+"""
+
 import sqlite3
 from pathlib import Path
 from typing import Optional
@@ -6,15 +21,9 @@ from .models import Listing
 
 
 class SeenStore:
-    """SQLite-backed dedup store.
-
-    Records both matched and rejected listings so we don't re-evaluate them
-    on subsequent runs. Keyed by ``<source>:<listing_id>``.
-    """
-
     _SCHEMA = """
     CREATE TABLE IF NOT EXISTS seen (
-        key           TEXT PRIMARY KEY,
+        key           TEXT PRIMARY KEY,      -- "<source>:<id>"
         source        TEXT NOT NULL,
         listing_id    TEXT NOT NULL,
         url           TEXT,
@@ -22,7 +31,7 @@ class SeenStore:
         price         INTEGER,
         area          REAL,
         status        TEXT NOT NULL,          -- 'matched' | 'rejected'
-        reject_reason TEXT,
+        reject_reason TEXT,                   -- populated only for status='rejected'
         first_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS seen_source_idx ON seen(source);

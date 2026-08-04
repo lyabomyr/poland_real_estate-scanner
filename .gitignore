@@ -8,5 +8,4 @@ dist/
 .vscode/
 data/*
 !data/.gitkeep
-!data/seen.db
 config.yml

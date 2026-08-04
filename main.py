@@ -1,3 +1,18 @@
+"""Kraków real-estate scanner — CLI entrypoint.
+
+Pipeline (per source, in config order):
+
+    fetch  →  parse  →  filter  →  dedup  →  aggregate  →  notify
+
+`aggregate` groups near-duplicate listings from the same street into one
+Telegram message (common with developer bulk-listings). See
+:mod:`scanner.aggregator` for the grouping rule.
+
+Design choice: aggregation is **per-source**, not global. Rolling up an OLX
+match with a Morizon match at the same address would hide the fact that the
+same apartment is on multiple platforms — which is information a buyer wants.
+"""
+
 import argparse
 import logging
 import sys
@@ -6,25 +21,27 @@ from typing import List
 
 import yaml
 
+from scanner.aggregator import ListingGroup, group_listings
 from scanner.filters import ListingFilter
-from scanner.format import format_plain
+from scanner.format import format_group_plain, format_plain
 from scanner.sources.base import BaseSource
 from scanner.sources.bzp import BzpSource
 from scanner.sources.komornik import KomornikSource
-from scanner.sources.listaprzetargow import ListaPrzetargowSource
 from scanner.sources.morizon import MorizonSource
 from scanner.sources.olx import OlxSource
 from scanner.sources.otodom import OtodomSource
 from scanner.storage import SeenStore
 from scanner.telegram import TelegramNotifier, discover_chats
 
+# Config-key → source class. To add a new source, drop a module in
+# scanner/sources/, subclass BaseSource, add it here, add its block in
+# config.example.yml. That's the entire registration surface.
 SOURCE_REGISTRY = {
     "otodom": OtodomSource,
     "olx": OlxSource,
     "morizon": MorizonSource,
-    "listaprzetargow": ListaPrzetargowSource,
-    "bzp": BzpSource,
     "komornik": KomornikSource,
+    "bzp": BzpSource,
 }
 
 
@@ -34,6 +51,12 @@ def load_config(path: str) -> dict:
 
 
 def build_sources(cfg: dict) -> List[BaseSource]:
+    """Instantiate every enabled source with its per-source config + shared HTTP settings.
+
+    Everything under ``sources.<name>`` (except ``enabled``) is passed as
+    kwargs to the source constructor. This means adding a new config knob to
+    a source needs zero changes here — just accept it in the constructor.
+    """
     http = cfg.get("http") or {}
     common = {
         "user_agent": http.get("user_agent", ""),
@@ -98,7 +121,10 @@ def main() -> int:
     if args.print_chats:
         return _print_chats(bot_token, log)
 
-    # auto-discover chat_id if the config leaves it empty / placeholder
+    # If chat_id was left blank / placeholder, try to auto-discover it via
+    # Telegram's getUpdates. Works only when the bot has recent activity in the
+    # target chat (see discover_chats() docs). Falls through with a warning
+    # otherwise — the run continues, matches just print to console.
     if bot_token and not bot_token.startswith("REPLACE") and (
         not chat_id or chat_id.startswith("REPLACE")
     ):
@@ -127,9 +153,13 @@ def main() -> int:
     if not notifier.is_configured():
         log.info("telegram not configured — matches will be printed to console only")
 
+    notif_cfg = cfg.get("notifications") or {}
+    min_group_size = int(notif_cfg.get("min_group_size", 3))
+
     stats = {"seen": 0, "already_seen": 0, "rejected": 0, "matched": 0, "sent": 0}
     for src in sources:
         log.info("=== scanning %s ===", src.name)
+        matched_here: list = []
         try:
             for listing in src.scan():
                 stats["seen"] += 1
@@ -140,18 +170,31 @@ def main() -> int:
                 if not ok:
                     log.debug("reject %s: %s (%s)", listing.url, reason, listing.title)
                     stats["rejected"] += 1
+                    # Persist rejections too — cheap, prevents re-evaluating the
+                    # same listing every 15 minutes forever.
                     if not args.dry_run:
                         store.add(listing, status="rejected", reject_reason=reason)
                     continue
                 stats["matched"] += 1
-                print(format_plain(listing))
-                print("-" * 60)
                 if not args.dry_run:
-                    if notifier.send(listing):
-                        stats["sent"] += 1
                     store.add(listing, status="matched")
+                matched_here.append(listing)
         except Exception:
             log.exception("source %s crashed", src.name)
+
+        # Group near-duplicates within this source only, then emit each item
+        # (either a single listing or a rolled-up group) once.
+        for item in group_listings(matched_here, min_group_size=min_group_size):
+            if isinstance(item, ListingGroup):
+                print(format_group_plain(item))
+                print("-" * 60)
+                if not args.dry_run and notifier.send_group(item):
+                    stats["sent"] += 1
+            else:
+                print(format_plain(item))
+                print("-" * 60)
+                if not args.dry_run and notifier.send(item):
+                    stats["sent"] += 1
 
     store.close()
     log.info("done: %s", stats)
@@ -167,6 +210,7 @@ def _try_discover(bot_token: str, log: logging.Logger) -> list:
 
 
 def _print_chats(bot_token: str, log: logging.Logger) -> int:
+    """`--print-chats` handler: list chats the bot has recently seen and exit."""
     if not bot_token or bot_token.startswith("REPLACE"):
         print("bot_token not set in config.yml", file=sys.stderr)
         return 2

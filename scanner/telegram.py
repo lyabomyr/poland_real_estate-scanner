@@ -1,21 +1,34 @@
+"""Telegram delivery + a helper for auto-discovering the ``chat_id``.
+
+The Bot API's per-group limit is ~20 messages/minute — a fresh scan easily
+exceeds that, so :meth:`_post` handles ``429 Too Many Requests`` by sleeping
+for ``retry_after`` seconds and retrying. The channel *never* misses a
+message; the run just takes a bit longer.
+"""
+
 import logging
 import time
 from typing import List
 
 import requests
 
-from .format import format_html
+from .aggregator import ListingGroup
+from .format import format_group_html, format_html
 from .models import Listing
 
 log = logging.getLogger(__name__)
 
 
 def discover_chats(bot_token: str, timeout: int = 10) -> List[dict]:
-    """Return chats the bot has recently seen activity in.
+    """Return chats the bot has *recently* seen activity in.
 
-    Uses Telegram ``getUpdates``. Only sees events from ~the last 24h and only
-    when no webhook is configured on the bot. Returns dicts with keys
-    ``id``, ``type``, ``title``.
+    Uses Telegram ``getUpdates``. Only sees events from ~the last 24 h, and
+    only when no webhook is registered on the bot. Returns dicts with keys
+    ``id`` / ``type`` / ``title``. Empty list on any error — main.py logs a
+    friendly message asking the user to poke the bot to generate an update.
+
+    Caveat: in a group with Privacy Mode ON (BotFather default) the bot only
+    sees commands addressed to it, so a plain "hi" won't surface the chat.
     """
     if not bot_token or bot_token.startswith("REPLACE"):
         return []
@@ -28,7 +41,10 @@ def discover_chats(bot_token: str, timeout: int = 10) -> List[dict]:
     data = r.json()
     if not data.get("ok"):
         return []
-    seen = {}
+
+    # Same chat may appear across multiple update types (message, my_chat_member,
+    # …). Dedup by chat.id, keep the first one we saw.
+    seen: dict = {}
     for upd in data.get("result", []) or []:
         for key in ("message", "channel_post", "edited_message",
                     "edited_channel_post", "my_chat_member", "chat_member"):
@@ -53,6 +69,13 @@ def discover_chats(bot_token: str, timeout: int = 10) -> List[dict]:
 
 
 class TelegramNotifier:
+    """Thin wrapper around Bot API ``sendMessage``.
+
+    Handles two output shapes — single :class:`Listing` and aggregated
+    :class:`ListingGroup` — through a common :meth:`_post` that respects 429
+    rate limits.
+    """
+
     def __init__(self, bot_token: str, chat_id: str, parse_mode: str = "HTML"):
         self.bot_token = bot_token
         self.chat_id = chat_id
@@ -67,27 +90,37 @@ class TelegramNotifier:
         )
 
     def send(self, l: Listing) -> bool:
+        # Single listings get a link preview — nicer visually.
+        return self._post(text=format_html(l), preview=True, tag=l.url)
+
+    def send_group(self, g: ListingGroup) -> bool:
+        # A group has many URLs; link previews would visually explode the message.
+        return self._post(text=format_group_html(g), preview=False, tag=f"group:{g.label}")
+
+    def _post(self, text: str, preview: bool, tag: str) -> bool:
         if not self.is_configured():
-            log.debug("telegram not configured; skipping send for %s", l.url)
+            log.debug("telegram not configured; skipping send for %s", tag)
             return False
         try:
             r = requests.post(
                 f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
                 data={
                     "chat_id": self.chat_id,
-                    "text": format_html(l),
+                    "text": text,
                     "parse_mode": self.parse_mode,
-                    "disable_web_page_preview": "false",
+                    "disable_web_page_preview": "false" if preview else "true",
                 },
                 timeout=30,
             )
             if r.status_code == 429:
+                # Telegram returns the exact backoff — sleep, then retry.
+                # +1 s gives us a safety margin against clock drift.
                 retry = int(r.json().get("parameters", {}).get("retry_after", 5))
                 log.warning("telegram rate-limited; sleeping %ds", retry + 1)
                 time.sleep(retry + 1)
-                return self.send(l)
+                return self._post(text, preview, tag)
             r.raise_for_status()
             return True
         except Exception as e:
-            log.error("telegram send failed for %s: %s", l.url, e)
+            log.error("telegram send failed for %s: %s", tag, e)
             return False

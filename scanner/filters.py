@@ -1,3 +1,10 @@
+"""Accept/reject rules applied to every :class:`~scanner.models.Listing`.
+
+Rejection reasons are returned as strings so we can persist them in the seen-store
+and later run ``sqlite3 data/seen.db 'SELECT reject_reason, COUNT(*) ...'`` to
+audit which filter is doing most of the work.
+"""
+
 import re
 from typing import Iterable, Optional, Tuple
 
@@ -15,18 +22,28 @@ class ListingFilter:
         self.min_area = min_area
         self.max_price = max_price
         self.min_build_year = min_build_year
+        # Word-boundary via lookarounds instead of \b so unicode chars in
+        # Polish keywords ("półpiwnica") don't lose their non-word neighbours.
         self._reject_patterns = [
             re.compile(rf"(?<!\w){re.escape(k)}(?!\w)", re.IGNORECASE)
             for k in reject_keywords
         ]
 
     def accepts(self, l: Listing) -> Tuple[bool, str]:
+        """Return ``(True, "")`` if the listing passes, else ``(False, reason)``.
+
+        Missing-value convention: unknown fields (``price=None``, ``area=None``,
+        ``build_year=None``) never trigger rejection. We only reject when the
+        source actually gave us a number that failed the threshold — otherwise
+        we'd throw away every komornik listing (they rarely publish m²).
+        """
         if l.price is not None and l.price > self.max_price:
             return False, f"price {l.price} > {self.max_price}"
         if l.area is not None and l.area < self.min_area:
             return False, f"area {l.area} < {self.min_area}"
         if self.min_build_year and l.build_year and l.build_year < self.min_build_year:
             return False, f"build_year {l.build_year} < {self.min_build_year}"
+
         haystack = " ".join(filter(None, [l.title, l.description, l.location]))
         for p in self._reject_patterns:
             if p.search(haystack):

@@ -1,3 +1,5 @@
+"""Otodom source — parses the Next.js ``__NEXT_DATA__`` blob for structured data."""
+
 import json
 import logging
 from typing import Iterable, Optional
@@ -9,48 +11,30 @@ from .base import BaseSource
 
 log = logging.getLogger(__name__)
 
+_ITEMS_PATHS = (
+    ("props", "pageProps", "data", "searchAds", "items"),
+    ("props", "pageProps", "data", "listing", "items"),
+    ("props", "pageProps", "searchAds", "items"),
+)
+
 
 class OtodomSource(BaseSource):
     name = "otodom"
-
-    def scan(self) -> Iterable[Listing]:
-        for page in range(1, self.pages + 1):
-            url = self._page_url(page)
-            log.info("otodom: fetching page %d", page)
-            try:
-                html = self.fetch(url)
-            except Exception as e:
-                log.error("otodom: fetch failed for %s: %s", url, e)
-                break
-            got = 0
-            for l in self._parse(html):
-                got += 1
-                yield l
-            log.info("otodom: page %d yielded %d listings", page, got)
-            if got == 0:
-                break
-            self._sleep()
-
-    def _page_url(self, page: int) -> str:
-        if page <= 1:
-            return self.url
-        sep = "&" if "?" in self.url else "?"
-        return f"{self.url}{sep}page={page}"
 
     def _parse(self, html: str) -> Iterable[Listing]:
         soup = BeautifulSoup(html, "html.parser")
         tag = soup.find("script", id="__NEXT_DATA__")
         if not tag or not tag.string:
-            log.warning("otodom: __NEXT_DATA__ script not found")
+            log.warning("%s: __NEXT_DATA__ script not found", self.name)
             return
         try:
             data = json.loads(tag.string)
         except json.JSONDecodeError as e:
-            log.error("otodom: bad __NEXT_DATA__ json: %s", e)
+            log.error("%s: bad __NEXT_DATA__ json: %s", self.name, e)
             return
         items = _extract_items(data)
         if not items:
-            log.warning("otodom: no items in __NEXT_DATA__ (schema drift?)")
+            log.warning("%s: no items in __NEXT_DATA__ (schema drift?)", self.name)
             return
         for it in items:
             listing = _to_listing(it)
@@ -59,19 +43,15 @@ class OtodomSource(BaseSource):
 
 
 def _extract_items(data: dict) -> list:
-    for path in (
-        ("props", "pageProps", "data", "searchAds", "items"),
-        ("props", "pageProps", "data", "listing", "items"),
-        ("props", "pageProps", "searchAds", "items"),
-    ):
+    for path in _ITEMS_PATHS:
         node = data
         try:
             for k in path:
                 node = node[k]
-            if isinstance(node, list):
-                return node
         except (KeyError, TypeError):
             continue
+        if isinstance(node, list):
+            return node
     return []
 
 
@@ -114,7 +94,6 @@ def _to_listing(it: dict) -> Optional[Listing]:
         slug = it.get("slug") or ""
         if not _id or not slug:
             return None
-        url = f"https://www.otodom.pl/pl/oferta/{slug}"
         price = _pick_price(it)
         area = _pick_number(it, ["areaInSquareMeters", "area"])
         rooms = _pick_number(it, ["roomsNumber", "rooms"])
@@ -122,7 +101,7 @@ def _to_listing(it: dict) -> Optional[Listing]:
         return Listing(
             source="otodom",
             id=_id,
-            url=url,
+            url=f"https://www.otodom.pl/pl/oferta/{slug}",
             title=it.get("title") or "",
             price=int(price) if isinstance(price, (int, float)) else None,
             area=float(area) if isinstance(area, (int, float)) else None,

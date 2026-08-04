@@ -1,14 +1,12 @@
-"""
-Source for the Polish public procurement portal (BZP / eZamówienia).
+"""BZP / eZamówienia — Polish public-procurement REST API.
 
-API endpoint documented in "Załącznik 3 – Instrukcja integracji z API BZP".
-The base URL is derived from the SPA config exposed at /mo-board/api/v1/Config.
+Documented in *Załącznik 3 – Instrukcja integracji z API BZP*. Base URL is
+``https://ezamowienia.gov.pl/mo-board/api/v1/Notice``. Overrides
+:meth:`scan` because the fetch is one API call, not paged HTML.
 
-Note: BZP mostly holds *public procurement* announcements (tenders, contracts,
-services). Genuine "apartment for sale" listings are rare here compared to
-Otodom/OLX — this source is worth having as a wide net for bankruptcy sales,
-communal property auctions, and public entities selling flats, but expect low
-volume.
+Note: BZP is mostly tenders, not sales. Genuine "apartment for sale"
+notices are rare (a handful per month). Tune ``order_object`` or ``cpv_code``
+for narrower search.
 """
 
 import logging
@@ -37,7 +35,7 @@ class BzpSource(BaseSource):
         order_object: Optional[str] = "mieszkanie",
         organization_city: Optional[str] = None,
         organization_province: Optional[str] = None,   # e.g. PL12 = małopolskie
-        cpv_code: Optional[str] = None,                # e.g. 70123100 for residential sale
+        cpv_code: Optional[str] = None,                # e.g. 70123100 = residential sale
         page_size: int = 100,
         **_ignored,
     ):
@@ -52,26 +50,13 @@ class BzpSource(BaseSource):
         self.page_size = min(int(page_size), 500)
 
     def scan(self) -> Iterable[Listing]:
-        now = datetime.now(timezone.utc)
-        params = {
-            "NoticeType": self.notice_type,
-            "PublicationDateFrom": (now - timedelta(days=self.days_back))
-                .strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "PublicationDateTo": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "PageSize": self.page_size,
-        }
-        if self.order_object:
-            params["OrderObject"] = self.order_object
-        if self.organization_city:
-            params["OrganizationCity"] = self.organization_city
-        if self.organization_province:
-            params["OrganizationProvince"] = self.organization_province
-        if self.cpv_code:
-            params["CpvCode"] = self.cpv_code
-
-        log.info("bzp: fetching notices params=%s", {
-            k: v for k, v in params.items() if k not in ("PublicationDateFrom", "PublicationDateTo")
-        })
+        params = self._query_params()
+        log.info(
+            "%s: fetching notices params=%s",
+            self.name,
+            {k: v for k, v in params.items()
+             if k not in ("PublicationDateFrom", "PublicationDateTo")},
+        )
         try:
             r = self.session.get(
                 self.API_URL,
@@ -82,33 +67,51 @@ class BzpSource(BaseSource):
             r.raise_for_status()
             items = r.json()
         except Exception as e:
-            log.error("bzp: fetch failed: %s", e)
+            log.error("%s: fetch failed: %s", self.name, e)
             return
 
         if not isinstance(items, list):
-            log.warning("bzp: unexpected response shape: %r", type(items).__name__)
+            log.warning("%s: unexpected response shape: %r", self.name, type(items).__name__)
             return
 
-        log.info("bzp: got %d notice(s)", len(items))
+        log.info("%s: got %d notice(s)", self.name, len(items))
         for it in items:
             listing = self._to_listing(it)
             if listing:
                 yield listing
+
+    def _query_params(self) -> dict:
+        now = datetime.now(timezone.utc)
+        params = {
+            "NoticeType": self.notice_type,
+            "PublicationDateFrom": (now - timedelta(days=self.days_back))
+                .strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "PublicationDateTo": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "PageSize": self.page_size,
+        }
+        for k, v in (
+            ("OrderObject", self.order_object),
+            ("OrganizationCity", self.organization_city),
+            ("OrganizationProvince", self.organization_province),
+            ("CpvCode", self.cpv_code),
+        ):
+            if v:
+                params[k] = v
+        return params
 
     def _to_listing(self, it: dict) -> Optional[Listing]:
         try:
             obj_id = it.get("objectId")
             if not obj_id:
                 return None
-            title = it.get("orderObject") or it.get("bzpNumber") or "(no title)"
             city = it.get("organizationCity") or ""
             org = it.get("organizationName") or ""
             location = ", ".join(x for x in (city, org) if x) or None
             return Listing(
-                source="bzp",
+                source=self.name,
                 id=str(obj_id),
                 url=self.DETAIL_URL.format(obj_id),
-                title=title,
+                title=it.get("orderObject") or it.get("bzpNumber") or "(no title)",
                 location=location,
                 description=it.get("cpvCode"),
             )
