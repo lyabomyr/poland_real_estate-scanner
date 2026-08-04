@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+dist/
+.idea/
+.vscode/
+data/*
+!data/.gitkeep
+!data/seen.db
+config.yml

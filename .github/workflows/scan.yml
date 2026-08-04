@@ -1,0 +1,68 @@
+name: scan
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # every 15 minutes (GitHub may delay by 5-15 min in peak hours)
+  workflow_dispatch:          # manual "Run workflow" button
+
+concurrency:
+  group: scan
+  cancel-in-progress: false   # never cancel a run mid-flight — let it finish and commit
+
+permissions:
+  contents: write             # needed to commit data/seen.db back to the repo
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Cache Poetry virtualenv
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pypoetry/virtualenvs
+          key: poetry-${{ runner.os }}-${{ hashFiles('poetry.lock') }}
+
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-root
+
+      - name: Render config from secrets
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID:   ${{ secrets.TG_CHAT_ID }}
+        run: |
+          cp config.example.yml config.yml
+          python - <<'PY'
+          import os, pathlib
+          p = pathlib.Path("config.yml")
+          text = p.read_text(encoding="utf-8")
+          text = text.replace('bot_token: "REPLACE_WITH_BOT_TOKEN"',
+                              f'bot_token: "{os.environ["TG_BOT_TOKEN"]}"')
+          text = text.replace('chat_id: ""',
+                              f'chat_id: "{os.environ["TG_CHAT_ID"]}"')
+          p.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Run scanner
+        run: poetry run python main.py
+
+      - name: Persist seen.db
+        run: |
+          if [ -f data/seen.db ]; then
+            git config user.name  "scanner-bot"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -f data/seen.db
+            git diff --cached --quiet || git commit -m "scanner: update seen.db [skip ci]"
+            git push
+          fi

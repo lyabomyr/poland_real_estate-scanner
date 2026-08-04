@@ -1,0 +1,75 @@
+search:
+  city: krakow
+  min_area: 39           # m²
+  max_price: 610000      # PLN
+  min_build_year: 1990   # skip listings whose build year is known and older than this
+
+filters:
+  # rejected if any of these appears in title/description/location (case-insensitive, word boundary)
+  reject_keywords:
+    - "TBS"
+    - "T.B.S"
+    - "suterena"
+    - "półpiwnica"
+    - "polpiwnica"
+    - "poziom -1"
+    - "piwnica mieszkalna"
+
+telegram:
+  bot_token: "REPLACE_WITH_BOT_TOKEN"
+  chat_id: ""                          # leave empty to auto-discover from getUpdates,
+                                       # or set explicitly: "@your_channel", "582409029", "-100..."
+  parse_mode: HTML
+
+storage:
+  db_path: ./data/seen.db
+
+http:
+  user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  timeout: 30
+  delay_seconds: 2
+
+sources:
+  otodom:
+    enabled: true
+    url: "https://www.otodom.pl/pl/wyniki/sprzedaz/mieszkanie/malopolskie/krakow/krakow/krakow?priceMax=610000&areaMin=39&limit=36&by=LATEST&direction=DESC"
+    pages: 2
+
+  olx:
+    enabled: true
+    url: "https://www.olx.pl/nieruchomosci/mieszkania/sprzedaz/krakow/?search%5Bfilter_float_price%3Ato%5D=610000&search%5Bfilter_float_m%3Afrom%5D=39"
+    pages: 2
+
+  morizon:
+    enabled: true
+    url: "https://www.morizon.pl/mieszkania/najnowsze/krakow/?ps%5Bprice_to%5D=610000&ps%5Bliving_area_from%5D=39"
+    pages: 2
+
+  # listaprzetargow.pl monitoring page is fully JS-rendered — SSR HTML is empty.
+  # Left disabled by default. Enable + add Playwright/headless if you really need it.
+  listaprzetargow:
+    enabled: false
+    url: "https://listaprzetargow.pl/monitoring-rynku?location=36992&facility_type=mieszkanie"
+
+  # licytacje.komornik.pl — bailiff auctions (public forced-sale of properties).
+  # Data lives in __NUXT_DATA__ on the search page (SSR), no headless browser needed.
+  komornik:
+    enabled: true
+    url: "https://licytacje.komornik.pl/wyszukiwarka-licytacji?mainCategory=REAL_ESTATE&subCategory=APARTMENTS&province=ma%C5%82opolskie&city=Krak%C3%B3w"
+    pages: 3
+
+  # BZP is Poland's public procurement portal — mostly tenders, not sales.
+  # Genuine "apartment for sale" listings are rare here (few per month), but
+  # occasional bankruptcy / communal-property auctions do show up.
+  bzp:
+    enabled: true
+    days_back: 7                     # look this many days back
+    notice_type: ContractNotice      # main type; other values via /api/v1/Notice/stats
+    order_object: mieszkanie         # free-text search on the subject field
+    organization_city: null          # e.g. "Kraków" — filters by the procuring entity's city
+    organization_province: null      # e.g. "PL12" = małopolskie (narrows heavily)
+    cpv_code: null                   # e.g. 70123100 (sale of residential real estate)
+    page_size: 200
+
+logging:
+  level: INFO

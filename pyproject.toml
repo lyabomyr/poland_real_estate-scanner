@@ -1,0 +1,21 @@
+[project]
+name = "poland-real-estate-scanner"
+version = "0.1.0"
+description = "Scans Otodom, OLX, and listaprzetargow.pl for Kraków apartments and alerts to Telegram."
+authors = [
+    { name = "Lubomyr Kachko", email = "lubomyr.kachko@stechinno.com" }
+]
+readme = "README.md"
+requires-python = ">=3.11,<4.0"
+dependencies = [
+    "requests (>=2.31,<3.0)",
+    "beautifulsoup4 (>=4.12,<5.0)",
+    "PyYAML (>=6.0,<7.0)",
+]
+
+[tool.poetry]
+package-mode = false
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
