@@ -256,6 +256,7 @@ class SeenStore:
             ("image_url", "ALTER TABLE seen ADD COLUMN image_url TEXT"),
             ("location", "ALTER TABLE seen ADD COLUMN location TEXT"),
             ("description", "ALTER TABLE seen ADD COLUMN description TEXT"),
+            ("city", "ALTER TABLE seen ADD COLUMN city TEXT"),
         ):
             if column not in existing_cols:
                 self.conn.execute(ddl)
@@ -264,6 +265,7 @@ class SeenStore:
         # guaranteed to exist by this point.
         self.conn.execute("CREATE INDEX IF NOT EXISTS seen_fuzzy_idx ON seen(fuzzy_key)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS seen_score_idx ON seen(score)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS seen_city_idx ON seen(city)")
 
         emission_cols = {
             r[1] for r in self.conn.execute("PRAGMA table_info(chat_emissions)").fetchall()
@@ -382,13 +384,15 @@ class SeenStore:
         status: str,
         reject_reason: Optional[str] = None,
         fuzzy_key: Optional[str] = None,
+        city: Optional[str] = None,
     ) -> None:
         self.conn.execute(
             """
             INSERT OR IGNORE INTO seen
                 (key, source, listing_id, url, title, price, area,
-                 status, reject_reason, fuzzy_key, image_url, location, description)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 status, reject_reason, fuzzy_key, image_url, location,
+                 description, city)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 listing.dedup_key,
@@ -404,6 +408,7 @@ class SeenStore:
                 listing.image_url,
                 listing.location,
                 listing.description,
+                city,
             ),
         )
         self.conn.commit()

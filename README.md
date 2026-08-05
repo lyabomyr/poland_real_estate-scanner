@@ -264,6 +264,31 @@ Deploy the Streamlit app, then put its final URL into `DASHBOARD_URL`.
 
 See [`dashboard/README.md`](dashboard/README.md).
 
+## Testing
+
+[`TEST_PLAN.md`](TEST_PLAN.md) is the full plan: 51 cases across nine risk
+areas, with what each one proves and where it runs.
+
+```bash
+make test                     # 91 unit tests, ~0.5s
+make lint                     # unused imports, undefined names
+make integration              # 27 cases against live portals + the database, ~3 min
+make check-dashboard-deps     # imports in a venv built from requirements.txt alone
+make boot-check               # boots the dashboard, hits every page
+make dry                      # full scan against live portals, sends nothing
+```
+
+The plan is organised around one question, because it is the one that bites
+here: **if this broke, would anything look wrong?** Every real defect in this
+project reported success while quietly dropping data — an oversized group
+message Telegram rejected, a killed run stranding 647 listings, a deleted
+keyword that un-rejected nothing, unpriced listings bypassing the budget
+filter, a bot command that silently never replied.
+
+`make test` and `make lint` run in CI. `make integration` does not: it needs
+credentials and hits live portals. Run it after touching a parser, a filter,
+or the delivery path.
+
 ## Local development
 
 Only Python 3.10+ is needed — dependencies come from

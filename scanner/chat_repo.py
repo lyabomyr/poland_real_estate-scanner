@@ -200,7 +200,8 @@ class ChatConfigRepo:
         )
         return {r[0] for r in cur.fetchall() if r[0]}
 
-    def undelivered(self, chat_id, limit: int = 2000) -> List[Listing]:
+    def undelivered(self, chat_id, city: Optional[str] = None,
+                    limit: int = 2000) -> List[Listing]:
         """Matched listings this chat has never been sent, best score first.
 
         This is the delivery backlog, and it exists because discovery and
@@ -213,6 +214,12 @@ class ChatConfigRepo:
         happened to see" means an interrupted run costs nothing: the next run
         picks up exactly where it stopped, without re-walking deep pages that
         the portal only surfaces on a full sweep.
+
+        ``city`` scopes it to one market. The table is shared across chats, so
+        without this a chat watching Katowice would be owed every Kraków
+        listing another chat had discovered. The caller also re-applies its
+        own filter — see MultiChatPipeline._delivery_backlog — because a chat
+        can tighten max_price at any time and the queue predates the change.
         """
         cur = self.store.conn.execute(
             """
@@ -221,6 +228,7 @@ class ChatConfigRepo:
                    s.score_reasons, s.fuzzy_key
             FROM seen s
             WHERE s.status = 'matched'
+              AND (? IS NULL OR s.city = ?)
               AND NOT EXISTS (
                   SELECT 1 FROM chat_emissions e
                   WHERE e.chat_id = ? AND e.listing_key = s.key
@@ -228,7 +236,7 @@ class ChatConfigRepo:
             ORDER BY s.score DESC, s.price ASC
             LIMIT ?
             """,
-            (str(chat_id), int(limit)),
+            (city, city, str(chat_id), int(limit)),
         )
         return [_listing_from_row(r) for r in cur.fetchall()]
 

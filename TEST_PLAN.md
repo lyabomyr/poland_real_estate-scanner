@@ -17,6 +17,7 @@ Four real examples, all found and fixed:
 | what happened | what it looked like |
 |---|---|
 | listings with no price bypassed `max_price` entirely | 117 of 645 queued messages, budget filter silently defeated |
+| the delivery queue ignored the chat's own config | tighten `max_price` and 988 of 998 queued listings still went out |
 | a 77-listing group rendered to 10 853 chars; Telegram rejects >4096 | 220 of 1004 listings unreachable, logs said nothing |
 | delivery driven by "what this scan saw"; the run was killed mid-send | 647 listings matched but never sent, re-stranded every run |
 | a keyword deleted from the config, but the stored row still said `rejected` | listing passed the filter, then vanished |
@@ -119,6 +120,9 @@ integration pass, **M** = manual.
 | R5.4 | filters changed since the sweep | sweep retired; next run re-walks every page | I, U |
 | R5.5 | rejected rows | never in the backlog | U |
 | R5.6 | a second chat | owed the same listings independently | U |
+| R5.12 | the budget is tightened after listings are queued | the queue is re-filtered, not delivered as-is | U |
+| R5.13 | a reject keyword is added after listings are queued | same — the queue respects the new rule | U |
+| R5.14 | a chat watching another city | queue scoped by `seen.city`; no cross-market leakage | U |
 | R5.7 | a short 429 | wait it out, message lands | U |
 | R5.8 | a long 429 | give up; it stays in the backlog for the next run | U |
 | R5.9 | persistent 429 | attempt cap — one message cannot monopolise a run | U |
@@ -208,7 +212,13 @@ R7.1  34 command forms all answer, all under 4096 chars
 R9.1  median 13504 zł/m², scores 31..83
 ```
 
-Three defects were found by this pass rather than by review:
+Four defects were found by this pass rather than by review:
+
+- **R5.12–14** — the queue is read from `seen`, which every chat writes to,
+  and it outlives config changes. A chat that tightened `max_price` through
+  the bot would still receive the listings queued under the old budget (988
+  of 998), and a chat watching Katowice was owed 814 Kraków listings. The
+  queue is now scoped by `seen.city` and re-filtered per chat before sending.
 
 - **R2.3** — listings with no published price bypassed `max_price`
   altogether: 117 of 645 queued messages. Otodom mixes whole developments

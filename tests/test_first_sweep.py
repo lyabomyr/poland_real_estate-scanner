@@ -217,7 +217,7 @@ class _Repo:
     def has_emitted(self, chat_id, key):
         return False
 
-    def undelivered(self, chat_id, limit=2000):
+    def undelivered(self, chat_id, city=None, limit=2000):
         return []
 
 
@@ -227,7 +227,8 @@ class FirstSweepTests(unittest.TestCase):
         from scanner.pipeline import ChatContext
 
         return ChatContext(
-            chat_id="-1", title="t", filter=ListingFilter(min_area=0, max_price=10**9),
+            chat_id="-1", title="t", city="krakow",
+            filter=ListingFilter(min_area=0, max_price=10**9),
             scorer=None, sources=[src], min_group_size=99, notifier=None,
         )
 

@@ -91,6 +91,7 @@ class ChatContext:
     """One chat's effective pipeline: filter + scorer + sources + destination."""
     chat_id: str
     title: Optional[str]
+    city: str
     filter: ListingFilter
     scorer: Optional[DealScorer]
     sources: List[BaseSource]
@@ -183,7 +184,22 @@ class MultiChatPipeline:
             l for listings in matched.values() for l in listings
             if l.previous_price is not None
         ]
-        backlog = self.repo.undelivered(ctx.chat_id)
+        backlog = self.repo.undelivered(ctx.chat_id, city=ctx.city)
+        # Re-apply this chat's filter. The queue can predate a config change:
+        # tighten max_price through the bot and the listings already queued
+        # were judged under the old budget, so they would arrive anyway.
+        kept, stale = [], 0
+        for listing in backlog:
+            if ctx.filter.accepts(listing)[0]:
+                kept.append(listing)
+            else:
+                stale += 1
+        if stale:
+            log.info(
+                "[%s] %d queued listing(s) no longer match this chat's filter "
+                "— dropped", ctx.chat_id, stale,
+            )
+        backlog = kept
         if backlog:
             log.info(
                 "[%s] delivery backlog: %d listing(s) matched but never sent",
@@ -243,10 +259,12 @@ class MultiChatPipeline:
                             src_rejects[_reject_kind(reason)] += 1
                             self.stats.rejected += 1
                             if not self.dry_run:
-                                self.store.add(listing, status="rejected", reject_reason=reason)
+                                self.store.add(listing, status="rejected",
+                                               reject_reason=reason, city=ctx.city)
                             continue
                         if not self.dry_run:
-                            self.store.add(listing, status="matched", fuzzy_key=listing.fuzzy_key)
+                            self.store.add(listing, status="matched",
+                                           fuzzy_key=listing.fuzzy_key, city=ctx.city)
                     else:
                         self.stats.already_seen += 1
                         # Still evaluate per-chat: filter override might let
@@ -461,6 +479,7 @@ def build_chat_context(
     return ChatContext(
         chat_id=row.chat_id,
         title=row.title,
+        city=ec.city_key(),
         filter=flt,
         scorer=scorer,
         sources=sources,

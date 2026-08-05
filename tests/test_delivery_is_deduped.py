@@ -47,7 +47,7 @@ class _Repo:
 
     def emitted_price(self, chat_id, key): return None
     def has_emitted(self, chat_id, key): return False
-    def undelivered(self, chat_id, limit=2000): return list(self._backlog)
+    def undelivered(self, chat_id, city=None, limit=2000): return list(self._backlog)
     def emitted_fuzzy_keys(self, chat_id): return set(self._emitted_fuzzy)
     def record_emission(self, chat_id, key, price=None): self.recorded.append(key)
 
@@ -66,7 +66,7 @@ class BacklogIsDedupedTests(unittest.TestCase):
         notifier = _Notifier()
         repo = _Repo(backlog=backlog, emitted_fuzzy=emitted_fuzzy)
         ctx = ChatContext(
-            chat_id="-1", title="t",
+            chat_id="-1", title="t", city="krakow",
             filter=ListingFilter(min_area=0, max_price=10**9),
             scorer=None, sources=[], min_group_size=99, notifier=notifier,
         )
@@ -165,3 +165,66 @@ class PlaceholderPriceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QueueRespectsTheChatsOwnConfigTests(unittest.TestCase):
+    """The queue is shared state; what each chat is owed is not.
+
+    Two ways this went wrong. The queue is read straight from `seen`, which
+    every chat writes to — so a chat watching Katowice was owed 814 Kraków
+    listings. And the queue outlives a config change: tighten max_price
+    through the bot and 988 of the 998 queued listings no longer qualify,
+    yet they were all still about to be sent.
+    """
+
+    def _deliver(self, backlog, chat_filter, city="krakow"):
+        notifier = _Notifier()
+        ctx = ChatContext(
+            chat_id="-1", title="t", city=city, filter=chat_filter,
+            scorer=None, sources=[], min_group_size=99, notifier=notifier,
+        )
+        pipe = MultiChatPipeline(
+            [ctx], store=_Store(), repo=_Repo(backlog=backlog), dry_run=False,
+        )
+        matched = pipe._delivery_backlog(ctx, {})
+        pipe._emit(ctx, pipe._cross_source_dedup(ctx, matched))
+        return notifier.sent
+
+    def test_a_tightened_budget_applies_to_what_is_already_queued(self) -> None:
+        queued = [
+            _listing("morizon", 1, price=350_000),
+            _listing("morizon", 2, price=550_000),   # over the new budget
+            _listing("morizon", 3, price=600_000),   # over the new budget
+        ]
+        sent = self._deliver(queued, ListingFilter(min_area=0, max_price=400_000))
+        self.assertEqual(["morizon:1"], sent)
+
+    def test_a_newly_added_reject_keyword_applies_too(self) -> None:
+        queued = [
+            _listing("morizon", 1),
+            Listing(source="morizon", id="2", url="u", title="TBS - 3 pokoje",
+                    price=500_000, area=45.0, location="Agatowa, Złocień, Kraków, x"),
+        ]
+        sent = self._deliver(
+            queued,
+            ListingFilter(min_area=0, max_price=10**9, reject_keywords=["TBS"]),
+        )
+        self.assertEqual(["morizon:1"], sent)
+
+    def test_the_queue_is_scoped_to_the_chats_city(self) -> None:
+        """Scoping happens in SQL, so assert the query is actually told the city."""
+        seen_args = {}
+
+        class _CityRepo(_Repo):
+            def undelivered(self, chat_id, city=None, limit=2000):
+                seen_args["city"] = city
+                return []
+
+        ctx = ChatContext(
+            chat_id="-1", title="t", city="katowice",
+            filter=ListingFilter(min_area=0, max_price=10**9),
+            scorer=None, sources=[], min_group_size=99, notifier=_Notifier(),
+        )
+        pipe = MultiChatPipeline([ctx], store=_Store(), repo=_CityRepo(), dry_run=False)
+        pipe._delivery_backlog(ctx, {})
+        self.assertEqual("katowice", seen_args["city"])

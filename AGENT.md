@@ -108,8 +108,31 @@ make test
 If you touched parsers, filters, scoring, or delivery flow, also run:
 
 ```bash
-make dry
+make dry            # full scan against live portals, sends nothing
+make integration    # 27 live cases: portals, database, bot commands (~3 min)
 ```
+
+### The test plan
+
+[`TEST_PLAN.md`](TEST_PLAN.md) holds 51 cases across nine risk areas (R1
+discovery … R9 observability). Read it before changing delivery, filtering or
+dedup — it records *why* each case exists, and most of them exist because the
+thing they guard actually broke.
+
+Add a case whenever you fix a bug where **the system reported success while
+dropping data**. That is the failure mode this project keeps producing, and
+the only one that cannot be noticed in normal use:
+
+- an oversized group message Telegram rejected → 220 listings unreachable
+- a run killed mid-delivery → 647 listings stranded, re-stranded every run
+- a keyword deleted from the config → the stored row still said `rejected`
+- listings with no price → bypassed `max_price` entirely
+- the delivery queue ignored the chat's own config → a tightened budget
+  didn't apply to what was already queued
+- a bot handler raising → the router catches it and the user gets silence
+
+A crash is fine; it gets noticed and fixed. Silence is what costs the user a
+flat they wanted.
 
 ## Config discipline
 
