@@ -132,12 +132,32 @@ Everything runs on free tiers:
 - state: Turso free tier
 - dashboard: Streamlit Community Cloud
 
+### Turso access
+
+The store talks to Turso over its **HTTP API** (`scanner/turso_http.py`),
+not the native `libsql-experimental` driver. That driver is a compiled Rust
+extension with wheels for a fixed CPython range (cp38-cp313 at 0.0.55); on
+anything newer pip attempts a source build that needs Rust + cmake, and it
+fails on hosts like Streamlit Cloud (CPython 3.14). For a remote database
+the native driver is the same network round trip, so it bought us nothing.
+
+Consequences to respect:
+
+- `TursoConnection` mimics only what we use: `execute`/`fetchone`/`fetchall`/
+  `description`/`rowcount`/`commit`/`close`. Extend it rather than reaching
+  for a driver.
+- Each `execute()` is its own HTTP request, so connection-scoped SQL like
+  `changes()` is unreliable — use `cursor.rowcount` (see `claim_update`).
+- Keep `requirements.txt` pure-Python; it is what Streamlit Cloud installs.
+
 Do not silently reintroduce:
 
 - a paid or always-on server (Vercel/Cloudflare/VPS) — this was tried and
   removed on purpose; the 15-minute reply latency is accepted
 - BZP as an active source — it is a public-procurement board, not a sales
   listing site, and produced ~1 irrelevant hit per month
+- `libsql-experimental` or any other compiled dependency — it broke the
+  hosted dashboard build once already
 
 ## Safety checks before saying done
 

@@ -8,7 +8,9 @@ pieces:
 2. **Streamlit dashboard** — read-only analytics plus per-chat override
    editing.
 
-State lives in **Turso/libSQL**. Local development falls back to SQLite.
+State lives in **Turso/libSQL**, reached over its HTTP API (no compiled
+driver — see [`scanner/turso_http.py`](scanner/turso_http.py)). Local
+development falls back to a plain SQLite file.
 
 > ⏱ **Bot replies take up to 15 minutes.** Commands are read by the scheduled
 > scan, not by an always-on server, so a message sent at 12:01 is answered by
@@ -242,6 +244,7 @@ scanner/
   pipeline.py                  MultiChatPipeline
   runtime_config.py            YAML load + env overrides
   telegram.py                  Bot API client, keyboard, greeting
+  turso_http.py                Turso HTTP client (sqlite3-shaped interface)
   sources/
     otodom.py  olx.py  morizon.py  komornik.py
 ```

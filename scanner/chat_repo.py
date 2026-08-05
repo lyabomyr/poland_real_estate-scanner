@@ -164,14 +164,19 @@ class ChatConfigRepo:
         self.store.conn.commit()
 
     def claim_update(self, update_id: int) -> bool:
-        self.store.conn.execute(
+        """Atomically claim an update id. True only for the first caller.
+
+        Uses the cursor's ``rowcount`` rather than ``SELECT changes()``: over
+        Turso's HTTP API each statement is its own request, so connection-scoped
+        ``changes()`` isn't reliable. ``rowcount`` is populated on both
+        backends (sqlite3 natively, Turso from ``affected_row_count``).
+        """
+        cur = self.store.conn.execute(
             "INSERT OR IGNORE INTO command_updates (update_id) VALUES (?)",
             (int(update_id),),
         )
-        cur = self.store.conn.execute("SELECT changes()")
         self.store.conn.commit()
-        row = cur.fetchone()
-        return bool(row and int(row[0]) > 0)
+        return bool(cur.rowcount and cur.rowcount > 0)
 
     # ── stats ─────────────────────────────────────────────────────────
 

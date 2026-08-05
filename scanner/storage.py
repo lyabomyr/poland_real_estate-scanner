@@ -33,13 +33,19 @@ from .models import Listing
 
 
 def _connect(path: str):
-    """Return a DB connection: Turso if creds in env, else local sqlite3."""
+    """Return a DB connection: Turso over HTTP if creds in env, else local sqlite3.
+
+    We deliberately use Turso's HTTP API rather than the native
+    ``libsql-experimental`` driver — see :mod:`scanner.turso_http` for why
+    (compiled Rust extension, no wheels for newer CPython, breaks hosted
+    deploys). For a remote DB it's the same network round trip anyway.
+    """
     url = os.environ.get("TURSO_URL")
     token = os.environ.get("TURSO_AUTH_TOKEN")
     if url and token:
-        # Import lazily so the dep is only needed when actually used.
-        import libsql_experimental as libsql
-        return libsql.connect(database=url, auth_token=token)
+        # Imported lazily so local-SQLite users don't pay for it.
+        from .turso_http import TursoConnection
+        return TursoConnection(url, token)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     return sqlite3.connect(path)
 

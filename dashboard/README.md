@@ -29,24 +29,30 @@ Without the two `TURSO_*` vars set, `db.py` falls back to a local
 ## Streamlit Community Cloud (free hosting)
 
 1. Push this repo to a **public** GitHub repo.
-2. Go to <https://share.streamlit.io> → **New app** → choose the repo.
+2. <https://share.streamlit.io> → **New app** → pick the repo.
 3. **Main file path**: `dashboard/app.py`.
-4. **Python version**: `3.11`.
-5. **Advanced → Secrets** — paste:
+4. **Advanced → Secrets** — paste:
    ```toml
    TURSO_URL = "libsql://…turso.io"
    TURSO_AUTH_TOKEN = "eyJhbGciOi…"
    ```
-6. Deploy. First build takes ~2 min (pip installs `libsql-experimental` +
-   `streamlit` + `pandas` + `plotly`).
+5. Deploy.
 
-The app URL will be `https://<slug>.streamlit.app`. Free tier: unlimited
-public apps, no sleep for actively-used ones.
+Dependencies come from the repo-root [`requirements.txt`](../requirements.txt),
+which Streamlit Cloud prefers over `pyproject.toml`. It is deliberately
+**pure-Python** — no compiled extensions — so the build cannot break on
+whatever CPython version the platform happens to run.
 
-After deploy, copy the final public URL into:
+> That mattered: the first deploy failed because `libsql-experimental` (the
+> native Turso driver) ships no cp314 wheel, Streamlit Cloud runs CPython
+> 3.14, pip attempted a source build and the Rust step died inside
+> `libsql-ffi`. The dashboard and scanner now reach Turso over its HTTP API
+> (see [`scanner/turso_http.py`](../scanner/turso_http.py)) and the native
+> driver is gone. For a remote database it was the same network round trip
+> anyway.
 
-- GitHub Actions variable `DASHBOARD_URL`
-- Vercel env var `DASHBOARD_URL`
+Free tier: unlimited public apps. An app with no visitors sleeps after
+~7 days; the next visit wakes it in ~30 s.
 
 ## Pages
 

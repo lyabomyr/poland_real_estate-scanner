@@ -27,16 +27,24 @@ from scanner.storage import SeenStore  # noqa: E402
 
 
 def _resolve_secrets() -> None:
-    """Copy Streamlit secrets into env so `SeenStore` picks Turso automatically."""
+    """Copy Streamlit secrets into env so `SeenStore` picks Turso automatically.
+
+    ``st.secrets`` is lazy: the attribute access is cheap, but *reading* from
+    it raises ``StreamlitSecretNotFoundError`` when no secrets.toml exists.
+    So the whole lookup has to sit inside the try, and we skip it entirely
+    when the env already carries both values (local dev with exported vars,
+    or a plain SQLite run).
+    """
+    wanted = ("TURSO_URL", "TURSO_AUTH_TOKEN")
+    if all(os.environ.get(key) for key in wanted):
+        return
     try:
-        secrets = st.secrets
-    except FileNotFoundError:
-        return
+        for key in wanted:
+            if key not in os.environ and key in st.secrets:
+                os.environ[key] = str(st.secrets[key])
     except Exception:
+        # No secrets configured — fall back to the local SQLite file.
         return
-    for key in ("TURSO_URL", "TURSO_AUTH_TOKEN"):
-        if key in secrets and key not in os.environ:
-            os.environ[key] = str(secrets[key])
 
 
 @st.cache_resource
