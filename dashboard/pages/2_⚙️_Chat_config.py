@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import streamlit as st
 
+from ui import render_connection_status
 from db import get_repo, load_chats, set_chat_enabled, upsert_chat_override
 from scanner.chat_config import ChatOverride
 
 st.set_page_config(page_title="Chat config — Kraków flats", page_icon="⚙️", layout="wide")
 st.title("⚙️ Chat configuration")
+
+if not render_connection_status():
+    st.stop()
 
 st.markdown(
     """

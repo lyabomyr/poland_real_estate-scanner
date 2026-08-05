@@ -5,10 +5,14 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from ui import render_connection_status
 from db import load_seen
 
 st.set_page_config(page_title="Listings — Kraków flats", page_icon="📋", layout="wide")
 st.title("📋 Matched listings")
+
+if not render_connection_status():
+    st.stop()
 
 df = load_seen(status="matched")
 if df.empty:

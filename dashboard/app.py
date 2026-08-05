@@ -11,6 +11,7 @@ import plotly.express as px
 import streamlit as st
 
 from db import load_chats, load_emissions_joined, load_seen
+from ui import render_connection_status
 
 st.set_page_config(
     page_title="Kraków flats — scanner",
@@ -20,15 +21,22 @@ st.set_page_config(
 
 st.title("🏢 Kraków flats — scanner")
 st.caption(
-    "Live read from Turso. Numbers update on every scan (\\*/15 min); "
-    "cached in the UI for 60 s. Refresh the page to re-fetch."
+    "Live read from Turso — the same database the scanner writes to. Numbers "
+    "update on every scan (\\*/15 min); cached in the UI for 60 s. Refresh to "
+    "re-fetch."
 )
+
+# Bail out early with an actionable message if we're not on the shared DB —
+# otherwise an unconfigured deploy renders as "the scanner never ran".
+if not render_connection_status():
+    st.stop()
 
 seen = load_seen()
 if seen.empty:
     st.info(
-        "No data yet — run `make run` (locally) or trigger the "
-        "**scan** workflow on GitHub Actions to populate the store."
+        "**Connected, but the database is empty.** No scan has stored anything "
+        "yet — trigger the **scan** workflow on GitHub Actions (or run "
+        "`make run` locally) and refresh."
     )
     st.stop()
 

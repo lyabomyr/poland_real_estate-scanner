@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -47,11 +48,45 @@ def _resolve_secrets() -> None:
         return
 
 
+@dataclass
+class Backend:
+    """Which database the UI actually ended up talking to.
+
+    Surfaced in the sidebar because the failure mode is otherwise silent and
+    confusing: with no secrets configured the store quietly opens an empty
+    local SQLite file, and the app looks like "the scanner never ran" instead
+    of "the dashboard isn't connected".
+    """
+    kind: str                      # "turso" | "sqlite"
+    detail: str                    # host, or local file path
+    error: Optional[str] = None    # set when Turso creds exist but fail
+
+    @property
+    def is_turso(self) -> bool:
+        return self.kind == "turso"
+
+
 @st.cache_resource
 def get_store() -> SeenStore:
     """Long-lived store handle. Cached across reruns; Streamlit keeps one per session."""
     _resolve_secrets()
     return SeenStore("./data/seen.db")
+
+
+@st.cache_data(ttl=30)
+def backend_info() -> Backend:
+    """Report the live backend, probing it so bad credentials surface as errors."""
+    _resolve_secrets()
+    url = os.environ.get("TURSO_URL")
+    if not (url and os.environ.get("TURSO_AUTH_TOKEN")):
+        return Backend(kind="sqlite", detail="./data/seen.db")
+
+    host = url.split("://", 1)[-1]
+    try:
+        get_store().conn.execute("SELECT 1").fetchone()
+    except Exception as exc:  # wrong token, revoked DB, network…
+        return Backend(kind="turso", detail=host, error=str(exc))
+    return Backend(kind="turso", detail=host)
 
 
 def get_repo() -> ChatConfigRepo:
