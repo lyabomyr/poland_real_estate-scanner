@@ -6,8 +6,10 @@ PY   := $(VENV)/bin/python
 PIP  := $(VENV)/bin/pip
 SELECT_PY := ./scripts/select_python.sh
 
-.PHONY: help install run dry config clean reset-db test lint chats prune greet \
-        check-dashboard-deps boot-check
+# There is no reset-db target: the dedup store is the shared Turso database,
+# never a local file, so wiping it is not a local operation.
+.PHONY: help install run dry config clean test lint chats prune greet \
+        pin-dashboard dashboard check-dashboard-deps boot-check
 
 help:
 	@awk 'BEGIN{FS=":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z_-]+:.*##/{printf "  \033[36m%-22s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
@@ -47,9 +49,6 @@ prune: config  ## archive + delete rejected rows older than storage.prune_reject
 
 dashboard: config  ## run the Streamlit dashboard locally on :8501
 	$(VENV)/bin/streamlit run dashboard/app.py
-
-reset-db:  ## delete the local SQLite dedup store
-	rm -f data/seen.db
 
 lint:  ## static-check for unused imports / undefined names
 	$(PY) -m pyflakes scanner/ main.py tests dashboard

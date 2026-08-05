@@ -1,6 +1,9 @@
-# Dependencies for Streamlit Community Cloud (dashboard/app.py).
+# The single dependency list for the whole project: the scanner, the Streamlit
+# dashboard, GitHub Actions (scan / prune / ci) and the local `make install`
+# venv all install from this file. There is no Poetry layer and no second
+# runtime list — requirements-dev.txt only adds dev-only extras on top.
 #
-# Streamlit Cloud installs from THIS file, not pyproject.toml. Two rules:
+# Two rules apply here:
 #
 #   1. Pure-Python only — every package here must ship a `py3-none-any`
 #      wheel, so the build can't break on whatever CPython version the
@@ -9,17 +12,16 @@
 #      source build and the Rust step failed. Turso is now reached over its
 #      HTTP API instead (scanner/turso_http.py) with no compiled driver.
 #
-#   2. Must cover everything the dashboard imports *transitively*. That is
+#   2. Must cover everything the dashboard imports *transitively* — including
+#      packages that look scanner-only. That is
 #      easy to get wrong: the dashboard imports scanner.introspection ->
 #      scanner.registry -> every source class -> bs4. beautifulsoup4 looks
 #      like a scanner-only dependency but the dashboard needs it to render
 #      source URLs and the decision tree.
 #
 # `make check-dashboard-deps` verifies rule 2 in an isolated venv — run it
-# after touching imports, because a local Poetry env has extra packages
-# installed and will happily hide a gap here.
-#
-# pyproject.toml stays the source of truth for local dev and GitHub Actions.
+# after touching imports. Your own .venv comes from requirements-dev.txt and
+# accumulates packages over time, so it will happily hide a gap here.
 streamlit>=1.61,<2.0
 pandas>=3.0,<4.0
 plotly>=6.9,<7.0

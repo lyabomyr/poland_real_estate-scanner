@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Verify requirements.txt actually covers everything the dashboard imports.
 #
-# Why this exists: a local Poetry environment has the scanner's dependencies
-# installed too, so importing the dashboard there succeeds even when
-# requirements.txt is missing something. Streamlit Cloud installs *only*
-# requirements.txt — and that's where the gap surfaces, as a
+# Why this exists: your local .venv is built from requirements-dev.txt and
+# accumulates packages over time, so importing the dashboard there succeeds
+# even when requirements.txt is missing something. Streamlit Cloud installs
+# *only* requirements.txt — and that's where the gap surfaces, as a
 # ModuleNotFoundError on a deployed page.
 #
 # This builds a throwaway venv with requirements.txt alone and imports every
