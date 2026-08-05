@@ -38,7 +38,7 @@ from .chat_repo import ChatConfigRepo, ChatRow
 from .filters import ListingFilter
 from .format import format_group_plain, format_plain
 from .models import Listing
-from .scoring import DealScorer, ScoringWeights
+from .scoring import DealScorer
 from .sources.base import BaseSource
 from .telegram import TelegramNotifier
 
@@ -100,16 +100,26 @@ class MultiChatPipeline:
                 log.info("chat %s: no sources enabled — skipping", ctx.chat_id)
                 continue
             log.info("=== chat %s (%s) ===", ctx.chat_id, ctx.title or "")
-            matched = self._scan_and_filter(ctx)
+            swept = []
+            matched = self._scan_and_filter(ctx, swept)
             matched = self._cross_source_dedup(ctx, matched)
             if ctx.scorer:
                 self._score(ctx, matched)
             self._emit(ctx, matched)
+            # Only now, with delivery done, is the first sweep of these URLs
+            # safe to write off. A run killed mid-delivery leaves them
+            # unmarked and sweeps them again, re-finding whatever was
+            # stranded on the deep pages — chat_emissions stops duplicates.
+            if not self.dry_run:
+                for url in swept:
+                    self.store.record_swept(url)
         return self.stats
 
     # ── phase 1 ────────────────────────────────────────────────────────
 
-    def _scan_and_filter(self, ctx: ChatContext) -> Dict[str, List[Listing]]:
+    def _scan_and_filter(
+        self, ctx: ChatContext, swept: List[str]
+    ) -> Dict[str, List[Listing]]:
         """Fetch every source for this chat, apply filter, collect matches per source.
 
         Same-source strict dedup uses the *global* seen table — a listing
@@ -118,6 +128,15 @@ class MultiChatPipeline:
         """
         matched: Dict[str, List[Listing]] = {}
         for src in ctx.sources:
+            first_sweep = bool(src.url) and not self.store.is_swept(src.url)
+            if first_sweep:
+                # Never seen this URL before — take the whole back-catalogue
+                # instead of just the newest page or two.
+                src.pages = 0
+                log.info(
+                    "[%s] %s: first sweep of this URL — scanning every page",
+                    ctx.chat_id, src.name,
+                )
             log.info("[%s] scanning %s", ctx.chat_id, src.name)
             matched[src.name] = []
             try:
@@ -163,6 +182,18 @@ class MultiChatPipeline:
                     matched[src.name].append(listing)
             except Exception:
                 log.exception("[%s] source %s crashed", ctx.chat_id, src.name)
+                # A crash mid-sweep means we did NOT see the whole
+                # back-catalogue, so leave the URL unmarked and sweep again
+                # next run rather than writing off the pages we never reached.
+                continue
+            if first_sweep:
+                if src.scan_completed:
+                    swept.append(src.url)
+                else:
+                    log.warning(
+                        "[%s] %s: first sweep was cut short — will retry next run",
+                        ctx.chat_id, src.name,
+                    )
         return matched
 
     def _note_price_change(self, listing: Listing) -> None:
@@ -264,27 +295,8 @@ def build_chat_context(
     from .scoring import DealScorer
 
     ec = EffectiveConfig(baseline=baseline_cfg, override=row.override)
-    flt = ListingFilter(
-        min_area=ec.min_area(),
-        max_price=ec.max_price(),
-        min_build_year=ec.min_build_year(),
-        reject_keywords=ec.reject_keywords(),
-    )
-
-    # Bound the filter to a chat-only max_area if set (baseline has no upper bound).
-    max_area = ec.override.max_area
-    if max_area is not None:
-        flt = _wrap_with_max_area(flt, max_area)
-
-    scoring_cfg = baseline_cfg.get("scoring") or {}
-    scorer: Optional[DealScorer] = None
-    if scoring_cfg.get("enabled", True):
-        weights = _build_weights(scoring_cfg, ec.weights())
-        scorer = DealScorer(
-            positive_kw=ec.positive_keywords(),
-            negative_kw=ec.negative_keywords(),
-            weights=weights,
-        )
+    flt = ListingFilter.from_config(ec)
+    scorer = DealScorer.from_config(ec, baseline_cfg)
 
     http = baseline_cfg.get("http") or {}
     common = {
@@ -319,30 +331,3 @@ def build_chat_context(
     )
 
 
-def _build_weights(scoring_cfg: dict, merged_weights: dict) -> ScoringWeights:
-    """YAML weights + chat override → :class:`ScoringWeights` instance."""
-    w = merged_weights or {}
-    return ScoringWeights(
-        base=int(w.get("base", 50)),
-        ppm2=int(w.get("price_per_m2", 25)),
-        ppm2_full_at=float(w.get("price_per_m2_full_at", 0.20)),
-        ppm2_reason_threshold=float(w.get("ppm2_reason_threshold", 0.03)),
-        area_sweet_bonus=int(w.get("area_sweet_bonus", 5)),
-        area_sweet_min=float(w.get("area_sweet_min", 40)),
-        area_sweet_max=float(w.get("area_sweet_max", 60)),
-        keyword=int(w.get("keyword", 3)),
-        min_median_sample=int(w.get("min_median_sample", 10)),
-    )
-
-
-def _wrap_with_max_area(inner: ListingFilter, max_area: float) -> ListingFilter:
-    """Chat-level max_area — baseline never had it, so wrap the filter."""
-    original_accepts = inner.accepts
-
-    def accepts(l):
-        if l.area is not None and l.area > max_area:
-            return False, f"area {l.area} > {max_area}"
-        return original_accepts(l)
-
-    inner.accepts = accepts  # type: ignore[method-assign]
-    return inner

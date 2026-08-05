@@ -12,7 +12,7 @@ from .chat_config import ChatOverride, EffectiveConfig
 from .cities import city_label
 from .registry import SOURCE_REGISTRY
 from .filters import ListingFilter
-from .scoring import DealScorer, ScoringWeights
+from .scoring import DealScorer
 
 REDACTED = "***REDACTED***"
 _SENSITIVE_KEY_BITS = (
@@ -172,20 +172,9 @@ def format_decision_tree(
     override: ChatOverride,
 ) -> str:
     ec = EffectiveConfig(baseline=baseline_cfg, override=override)
-    filter_model = ListingFilter(
-        min_area=ec.min_area(),
-        max_price=ec.max_price(),
-        min_build_year=ec.min_build_year(),
-        reject_keywords=ec.reject_keywords(),
-    )
-    weights = _build_weights(ec)
-    scorer = None
-    if (baseline_cfg.get("scoring") or {}).get("enabled", True):
-        scorer = DealScorer(
-            positive_kw=ec.positive_keywords(),
-            negative_kw=ec.negative_keywords(),
-            weights=weights,
-        )
+    # Same factories the scanner uses — the tree describes the real thing.
+    filter_model = ListingFilter.from_config(ec)
+    scorer = DealScorer.from_config(ec, baseline_cfg)
 
     lines = [
         "Decision tree (effective runtime)",
@@ -201,7 +190,7 @@ def format_decision_tree(
         "",
         "2. Hard filters (in execution order)",
     ]
-    for rule in filter_model.describe(max_area=ec.max_area()):
+    for rule in filter_model.describe():
         lines.append(f"- {rule}")
     lines.extend(
         [
@@ -263,21 +252,6 @@ def number_chunks(chunks: Iterable[str], title: str) -> List[str]:
         return chunks
     total = len(chunks)
     return [f"{title} ({i}/{total})\n\n{chunk}" for i, chunk in enumerate(chunks, start=1)]
-
-
-def _build_weights(ec: EffectiveConfig) -> ScoringWeights:
-    merged = ec.weights()
-    return ScoringWeights(
-        base=int(merged.get("base", 50)),
-        ppm2=int(merged.get("price_per_m2", 25)),
-        ppm2_full_at=float(merged.get("price_per_m2_full_at", 0.20)),
-        ppm2_reason_threshold=float(merged.get("ppm2_reason_threshold", 0.03)),
-        area_sweet_bonus=int(merged.get("area_sweet_bonus", 5)),
-        area_sweet_min=float(merged.get("area_sweet_min", 40)),
-        area_sweet_max=float(merged.get("area_sweet_max", 60)),
-        keyword=int(merged.get("keyword", 3)),
-        min_median_sample=int(merged.get("min_median_sample", 10)),
-    )
 
 
 def _looks_like_url(value: str) -> bool:

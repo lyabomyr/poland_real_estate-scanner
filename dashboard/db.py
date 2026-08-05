@@ -153,18 +153,6 @@ def get_repo() -> ChatConfigRepo:
     return ChatConfigRepo(get_store())
 
 
-@st.cache_data(ttl=60)
-def load_seen(status: Optional[str] = None) -> pd.DataFrame:
-    """Full ``seen`` table as a DataFrame. Cached 60s to avoid hammering Turso on every rerun."""
-    q = "SELECT * FROM seen"
-    params: tuple = ()
-    if status:
-        q += " WHERE status = ?"
-        params = (status,)
-    q += " ORDER BY first_seen_at DESC"
-    return _query_df(q, params)
-
-
 def _query_df(query: str, params: tuple = ()) -> pd.DataFrame:
     """Run a SELECT and return the result as a DataFrame.
 
@@ -239,21 +227,6 @@ def load_price_history() -> pd.DataFrame:
         "       s.source, s.title, s.url, s.area "
         "FROM price_history h LEFT JOIN seen s ON s.key = h.listing_key "
         "ORDER BY h.changed_at DESC"
-    )
-
-
-@st.cache_data(ttl=60)
-def load_emissions_joined() -> pd.DataFrame:
-    """Chat emissions joined with the listing they refer to. One row per (chat, listing)."""
-    return _query_df(
-        """
-        SELECT
-            e.chat_id, e.sent_at,
-            s.source, s.title, s.url, s.price, s.area, s.fuzzy_key, s.first_seen_at
-        FROM chat_emissions e
-        JOIN seen s ON s.key = e.listing_key
-        ORDER BY e.sent_at DESC
-        """
     )
 
 

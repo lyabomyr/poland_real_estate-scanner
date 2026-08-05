@@ -115,6 +115,20 @@ _SCHEMA_STMTS = [
         first_greeted_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
     """,
+    # Search URLs whose full back-catalogue has been swept at least once.
+    #
+    # Portals sort newest-first, so a steady-state run only needs the first
+    # page or two. That is wrong exactly once — on the very first run against
+    # a URL, when everything already listed sits on pages 3..20 and would
+    # never be looked at. Keyed by URL rather than by source name because
+    # chats can point the same source at different cities or price bands;
+    # each of those deserves its own first sweep.
+    """
+    CREATE TABLE IF NOT EXISTS swept_urls (
+        url          TEXT PRIMARY KEY,
+        completed_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
     # Per-chat configuration overrides. Every enabled chat receives matches
     # filtered/scored/routed through its own effective config. See
     # scanner.chat_config for the merge semantics.
@@ -251,6 +265,27 @@ class SeenStore:
     def has(self, key: str) -> bool:
         cur = self.conn.execute("SELECT 1 FROM seen WHERE key = ? LIMIT 1", (key,))
         return cur.fetchone() is not None
+
+    # ── swept_urls ─────────────────────────────────────────────────────
+
+    def is_swept(self, url: str) -> bool:
+        """Has this search URL had its full back-catalogue walked already?"""
+        cur = self.conn.execute(
+            "SELECT 1 FROM swept_urls WHERE url = ? LIMIT 1", (url,)
+        )
+        return cur.fetchone() is not None
+
+    def record_swept(self, url: str) -> None:
+        """Mark a URL as fully swept.
+
+        Only call this once the sweep's listings have actually been delivered.
+        Recording it earlier would mean a run killed mid-delivery never
+        retries the deep pages, silently stranding everything it found there.
+        """
+        self.conn.execute(
+            "INSERT OR IGNORE INTO swept_urls (url) VALUES (?)", (url,)
+        )
+        self.conn.commit()
 
     # ── greeted_chats ──────────────────────────────────────────────────
 

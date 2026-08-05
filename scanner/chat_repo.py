@@ -174,20 +174,6 @@ class ChatConfigRepo:
 
     # ── command deduplication (never process the same update twice) ───
 
-    def is_update_processed(self, update_id: int) -> bool:
-        cur = self.store.conn.execute(
-            "SELECT 1 FROM command_updates WHERE update_id = ? LIMIT 1",
-            (int(update_id),),
-        )
-        return cur.fetchone() is not None
-
-    def mark_update_processed(self, update_id: int) -> None:
-        self.store.conn.execute(
-            "INSERT OR IGNORE INTO command_updates (update_id) VALUES (?)",
-            (int(update_id),),
-        )
-        self.store.conn.commit()
-
     def claim_update(self, update_id: int) -> bool:
         """Atomically claim an update id. True only for the first caller.
 

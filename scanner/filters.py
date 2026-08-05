@@ -18,8 +18,12 @@ class ListingFilter:
         max_price: int,
         min_build_year: Optional[int] = None,
         reject_keywords: Iterable[str] = (),
+        max_area: Optional[float] = None,
     ):
         self.min_area = min_area
+        #: Upper area cap. Chat-level only — the YAML baseline has no such
+        #: bound, so ``None`` means "no upper limit".
+        self.max_area = max_area
         self.max_price = max_price
         self.min_build_year = min_build_year
         self.reject_keywords = list(reject_keywords)
@@ -33,6 +37,21 @@ class ListingFilter:
             for k in self.reject_keywords
         ]
 
+    @classmethod
+    def from_config(cls, ec) -> "ListingFilter":
+        """Build from an ``EffectiveConfig`` (YAML baseline + chat override).
+
+        The scanner and the decision-tree renderer both build their filter
+        here, so what the tree describes is by construction what runs.
+        """
+        return cls(
+            min_area=ec.min_area(),
+            max_area=ec.max_area(),
+            max_price=ec.max_price(),
+            min_build_year=ec.min_build_year(),
+            reject_keywords=ec.reject_keywords(),
+        )
+
     def accepts(self, l: Listing) -> Tuple[bool, str]:
         """Return ``(True, "")`` if the listing passes, else ``(False, reason)``.
 
@@ -45,6 +64,8 @@ class ListingFilter:
             return False, f"price {l.price} > {self.max_price}"
         if l.area is not None and l.area < self.min_area:
             return False, f"area {l.area} < {self.min_area}"
+        if self.max_area is not None and l.area is not None and l.area > self.max_area:
+            return False, f"area {l.area} > {self.max_area}"
         if self.min_build_year and l.build_year and l.build_year < self.min_build_year:
             return False, f"build_year {l.build_year} < {self.min_build_year}"
 
@@ -54,14 +75,18 @@ class ListingFilter:
                 return False, f"keyword {p.pattern!r}"
         return True, ""
 
-    def describe(self, max_area: Optional[float] = None) -> list[str]:
-        """Human-readable rule list built from the same thresholds we execute."""
+    def describe(self) -> list[str]:
+        """Human-readable rule list built from the same thresholds we execute.
+
+        Reads its own attributes so the decision tree shown in Telegram and on
+        the dashboard cannot drift from what :meth:`accepts` actually does.
+        """
         rules = [
             f"reject if price is known and > {self.max_price}",
             f"reject if area is known and < {self.min_area}",
         ]
-        if max_area is not None:
-            rules.append(f"reject if area is known and > {max_area}")
+        if self.max_area is not None:
+            rules.append(f"reject if area is known and > {self.max_area}")
         if self.min_build_year is not None:
             rules.append(
                 f"reject if build_year is known and < {self.min_build_year}"

@@ -55,6 +55,33 @@ class ScoringWeights:
     keyword: int = 3
     min_median_sample: int = 10
 
+    @classmethod
+    def from_config(cls, ec) -> "ScoringWeights":
+        """Build from an ``EffectiveConfig`` (YAML baseline + chat override).
+
+        The single place that maps YAML keys onto weights. The scanner and the
+        decision tree shown in Telegram / the dashboard both go through here,
+        so the tree can never advertise different numbers than the ones the
+        scorer actually applies.
+        """
+        w = ec.weights() or {}
+        defaults = cls()
+        return cls(
+            base=int(w.get("base", defaults.base)),
+            ppm2=int(w.get("price_per_m2", defaults.ppm2)),
+            ppm2_full_at=float(w.get("price_per_m2_full_at", defaults.ppm2_full_at)),
+            ppm2_reason_threshold=float(
+                w.get("ppm2_reason_threshold", defaults.ppm2_reason_threshold)
+            ),
+            area_sweet_bonus=int(w.get("area_sweet_bonus", defaults.area_sweet_bonus)),
+            area_sweet_min=float(w.get("area_sweet_min", defaults.area_sweet_min)),
+            area_sweet_max=float(w.get("area_sweet_max", defaults.area_sweet_max)),
+            keyword=int(w.get("keyword", defaults.keyword)),
+            min_median_sample=int(
+                w.get("min_median_sample", defaults.min_median_sample)
+            ),
+        )
+
 
 @dataclass
 class KeywordRule:
@@ -100,6 +127,21 @@ class DealScorer:
         self.w = weights or ScoringWeights()
         self._positive = _compile_rules(positive_kw, self.w.keyword)
         self._negative = _compile_rules(negative_kw, self.w.keyword)
+
+    @classmethod
+    def from_config(cls, ec, baseline_cfg: dict) -> "Optional[DealScorer]":
+        """Build a scorer for a chat, or ``None`` when scoring is switched off.
+
+        ``scoring.enabled`` is a baseline-wide switch rather than a per-chat
+        one, hence the second argument.
+        """
+        if not (baseline_cfg.get("scoring") or {}).get("enabled", True):
+            return None
+        return cls(
+            positive_kw=ec.positive_keywords(),
+            negative_kw=ec.negative_keywords(),
+            weights=ScoringWeights.from_config(ec),
+        )
 
     def make_context(self, ppm2_values: Iterable[float]) -> ScoringContext:
         """Build the run-wide context using this scorer's ``min_median_sample``."""

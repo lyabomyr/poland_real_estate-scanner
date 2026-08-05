@@ -70,6 +70,12 @@ class BaseSource:
         self.pages = int(pages)
         self.timeout = int(timeout)
         self.delay = float(delay)
+        #: True once :meth:`scan` has walked the result set to its end. False
+        #: after a fetch failure cut the walk short. Callers doing a one-off
+        #: full sweep must check this: scan() swallows fetch errors so one
+        #: source can't kill a run, which without this flag makes a truncated
+        #: walk indistinguishable from a complete one.
+        self.scan_completed = False
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": user_agent,
@@ -78,13 +84,29 @@ class BaseSource:
 
     # --- public --------------------------------------------------------
 
+    #: Hard stop for an unlimited (``pages=0``) sweep. Portals happily serve
+    #: page 999 by wrapping around or repeating, so a "page yielded nothing"
+    #: exit condition alone could loop forever. No Polish city has anywhere
+    #: near this many pages of flats in one price band.
+    MAX_PAGES = 100
+
     def scan(self) -> Iterable[Listing]:
-        for page in range(1, self.pages + 1):
+        # pages=0 means "walk until a page comes back empty" — used for the
+        # first sweep of a URL, where capping at 2 would leave most of the
+        # market unseen. Steady-state runs use the small configured cap
+        # because both portals sort newest-first.
+        self.scan_completed = False
+        unlimited = self.pages <= 0
+        last = self.MAX_PAGES if unlimited else self.pages
+        for page in range(1, last + 1):
             url = self._page_url(page)
             log.info("%s: fetching page %d", self.name, page)
             try:
                 html = self.fetch(url)
             except Exception as e:
+                # Deliberately not re-raised: one flaky portal must not abort
+                # the whole run. scan_completed stays False so a caller doing
+                # a first sweep knows the deep pages went unread.
                 log.error("%s: fetch failed for %s: %s", self.name, url, e)
                 return
             got = 0
@@ -93,8 +115,16 @@ class BaseSource:
                 yield listing
             log.info("%s: page %d yielded %d listings", self.name, page, got)
             if got == 0:
+                self.scan_completed = True
                 return
             self._sleep()
+        if unlimited:
+            log.warning(
+                "%s: stopped at the %d-page safety cap without hitting an "
+                "empty page — some listings may be unread",
+                self.name, last,
+            )
+        self.scan_completed = True
 
     def fetch(self, url: str) -> str:
         r = self.session.get(url, timeout=self.timeout)
