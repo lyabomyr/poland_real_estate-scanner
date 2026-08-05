@@ -223,3 +223,42 @@ class ScanAuthorizationTests(unittest.TestCase):
         for _ in range(10):
             self.repo.record_scan_dispatch("-100777", 1)
         self.assertIsNone(router._scan_cooldown_error())
+
+
+class DispatchErrorHintTests(unittest.TestCase):
+    """A misconfigured GITHUB_WORKFLOW_TOKEN must produce an actionable message."""
+
+    def _http_error(self, status: int):
+        import requests
+
+        response = requests.Response()
+        response.status_code = status
+        return requests.HTTPError(f"{status} error", response=response)
+
+    def test_401_points_at_an_invalid_or_expired_token(self) -> None:
+        from scanner.commands import _dispatch_error_hint
+
+        hint = _dispatch_error_hint(self._http_error(401))
+        self.assertIn("GITHUB_WORKFLOW_TOKEN", hint)
+        self.assertIn("expired", hint)
+
+    def test_403_points_at_the_missing_permission(self) -> None:
+        from scanner.commands import _dispatch_error_hint
+
+        self.assertIn("Actions: write", _dispatch_error_hint(self._http_error(403)))
+
+    def test_404_mentions_repo_access_and_workflow_file(self) -> None:
+        from scanner.commands import _dispatch_error_hint
+
+        hint = _dispatch_error_hint(self._http_error(404))
+        self.assertIn("GITHUB_SCAN_WORKFLOW_FILE", hint)
+
+    def test_422_points_at_the_ref(self) -> None:
+        from scanner.commands import _dispatch_error_hint
+
+        self.assertIn("GITHUB_SCAN_WORKFLOW_REF", _dispatch_error_hint(self._http_error(422)))
+
+    def test_non_http_error_is_reported_verbatim(self) -> None:
+        from scanner.commands import _dispatch_error_hint
+
+        self.assertIn("boom", _dispatch_error_hint(RuntimeError("boom")))

@@ -278,13 +278,21 @@ class CommandRouter:
                     parse_mode=None,
                 )
             ]
-        result = dispatcher.dispatch_scan(
-            trigger_chat_id=ctx.chat_id,
-            trigger_chat_title=ctx.chat_title,
-            trigger_user_id=ctx.user_id,
-            trigger_user_name=ctx.user_name,
-            command="scan",
-        )
+        try:
+            result = dispatcher.dispatch_scan(
+                trigger_chat_id=ctx.chat_id,
+                trigger_chat_title=ctx.chat_title,
+                trigger_user_id=ctx.user_id,
+                trigger_user_name=ctx.user_name,
+                command="scan",
+            )
+        except Exception as e:
+            # A misconfigured / expired GITHUB_WORKFLOW_TOKEN is by far the
+            # likeliest failure here, and the raw requests traceback tells the
+            # user nothing actionable. Map the HTTP status to a real fix.
+            log.error("scan dispatch failed for chat=%s: %s", ctx.chat_id, e)
+            return [BotReply(_dispatch_error_hint(e), parse_mode=None)]
+
         self.repo.record_scan_dispatch(ctx.chat_id, ctx.user_id)
         lines = [
             "Scan queued.",
@@ -529,6 +537,41 @@ class CommandRouter:
             )
         except Exception as e:
             log.error("command router: reply to %s failed: %s", chat_id, e)
+
+
+def _dispatch_error_hint(error: Exception) -> str:
+    """Turn a failed workflow_dispatch into an actionable message.
+
+    GitHub's status codes map cleanly onto the three ways
+    ``GITHUB_WORKFLOW_TOKEN`` is usually wrong, so name the fix instead of
+    echoing a stack trace at the user.
+    """
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    hints = {
+        401: (
+            "GitHub rejected the token (401).\n\n"
+            "GITHUB_WORKFLOW_TOKEN is invalid or expired — generate a new "
+            "fine-grained token and update it in the Vercel env vars."
+        ),
+        403: (
+            "GitHub refused the dispatch (403).\n\n"
+            "The token is missing the 'Actions: write' repository permission."
+        ),
+        404: (
+            "GitHub could not find the workflow (404).\n\n"
+            "Check GITHUB_REPOSITORY_OWNER / GITHUB_REPOSITORY_NAME / "
+            "GITHUB_SCAN_WORKFLOW_FILE, and that the token grants access to "
+            "this repository. A token without repo access also reports 404."
+        ),
+        422: (
+            "GitHub rejected the inputs (422).\n\n"
+            "Usually GITHUB_SCAN_WORKFLOW_REF points at a branch where "
+            "scan.yml has no workflow_dispatch trigger."
+        ),
+    }
+    if status in hints:
+        return hints[status]
+    return f"Could not queue the scan: {error}"
 
 
 def _add_kw(target: list, args: list, sign: str) -> BotReply:
