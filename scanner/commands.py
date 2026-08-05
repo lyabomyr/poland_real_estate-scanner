@@ -87,6 +87,7 @@ class CommandRouter:
             "min_area": lambda a, o, c: self._set_float(a, o, "min_area"),
             "max_area": lambda a, o, c: self._set_float(a, o, "max_area"),
             "min_year": lambda a, o, c: self._set_int(a, o, "min_build_year"),
+            "grouping": self._cmd_grouping,
             "reset": self._cmd_reset,
             "source": self._cmd_source,
             "kw": self._cmd_kw,
@@ -187,6 +188,7 @@ class CommandRouter:
             "/min_area N — override min area (m²)",
             "/max_area N — set an upper area cap",
             "/min_year Y — earliest build year accepted",
+            "/grouping [N] — explain grouping, or set the threshold",
             "/source NAME on|off — enable/disable a data source",
             "/source NAME url URL — custom URL for a source (this chat only)",
             "/kw + NAME [WEIGHT] — add positive scoring keyword",
@@ -206,6 +208,57 @@ class CommandRouter:
         if url:
             lines.append(f"\n📊 Dashboard: {url}")
         return [BotReply("\n".join(lines))]
+
+    def _cmd_grouping(
+        self, args: List[str], override: ChatOverride, ctx: CommandContext
+    ) -> List[BotReply]:
+        """Explain grouping, and set the threshold when given a number.
+
+        Grouping is the one feature that changes how many messages arrive, so
+        it is also the one users most suspect of hiding listings. The reply
+        answers that head-on with a worked example.
+        """
+        if args:
+            # 0 or a negative threshold would make every single listing a
+            # "group of one" and the roll-up meaningless, so refuse it here
+            # rather than let the generic int setter store nonsense.
+            if args[0].lstrip("-").isdigit() and int(args[0]) < 1:
+                return [BotReply(
+                    "Grouping starts at 1. Use /grouping 99 to switch it off.",
+                    parse_mode=None,
+                )]
+            return self._set_int(args, override, "min_group_size")
+
+        current = EffectiveConfig(
+            baseline=self.baseline_cfg, override=override
+        ).min_group_size()
+        return [BotReply("\n".join([
+            "<b>Grouping — fewer messages, never fewer flats</b>",
+            "",
+            f"Right now: <b>{current}+</b> flats at the same address, from the "
+            "same portal, arrive as one message instead of separately.",
+            "",
+            "Developers post every unit of a new building as its own ad. "
+            "Without grouping, twenty near-identical entries bury the one flat "
+            "actually worth looking at.",
+            "",
+            "<b>Nothing is filtered out.</b> A grouped message lists every "
+            "flat with its own price, size, score and link, best score first:",
+            "",
+            "<code>[morizon] 5 similar listings — Sołtysowska, Czyżyny",
+            "1. 579 510 zł · 41 m² · ★ 53 · otwórz",
+            "2. 594 935 zł · 41 m² · ★ 50 · otwórz",
+            "3. 601 470 zł · 51 m² · ★ 74 · otwórz</code>",
+            "",
+            "More than 20 at one address arrive as several messages "
+            "“(1/4)”, “(2/4)” — Telegram rejects anything longer, and a "
+            "rejected message would be a flat you never see.",
+            "",
+            "<b>Change it</b>",
+            "/grouping 2 — roll up even a pair",
+            "/grouping 99 — off: every flat gets its own message",
+            "/reset min_group_size — back to the default",
+        ]))]
 
     def _cmd_dashboard(self) -> List[BotReply]:
         url = self._dashboard_url()
@@ -234,7 +287,10 @@ class CommandRouter:
                 else "min_year: off"
             ),
             f"sources: {', '.join(ec.enabled_source_names()) or '(none)'}",
-            f"group notifications: {ec.min_group_size()}+ similar listings",
+            (
+                f"grouping: {ec.min_group_size()}+ flats at one address arrive "
+                "as one message (/grouping)"
+            ),
         ]
         if override.paused:
             lines.append("⏸️ paused — /resume to re-enable")

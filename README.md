@@ -114,6 +114,41 @@ Three dedup layers:
 2. Cross-source fuzzy key: `<price>|<round(area)>|<first non-city location token>`
 3. Per-source aggregation for bulk developer listings
 
+### Grouping — fewer messages, never fewer flats
+
+Layer 3 is the only thing that changes how many messages you get, so it is
+worth being precise about: **it never removes a listing.** When
+`min_group_size` (default 3) or more new listings from the same portal share
+an address, they arrive as one message with a line per flat, best score first:
+
+```
+[morizon] 5 similar listings — Sołtysowska, Czyżyny
+1. 579 510 zł · 41 m² · ★ 53 · otwórz
+2. 594 935 zł · 41 m² · ★ 50 · otwórz
+3. 601 470 zł · 51 m² · ★ 74 · otwórz
+4. 604 200 zł · 42 m² · ★ 48 · otwórz
+5. 610 000 zł · 45 m² · ★ 52 · otwórz
+```
+
+Developers post every unit of a new building separately; without this, twenty
+near-identical entries bury the flat actually worth opening.
+
+More than 20 at one address are split into `(1/4)`, `(2/4)` … messages.
+That split is not cosmetic: Telegram rejects any message over 4096 characters,
+and a rejected message is never recorded as delivered, so it is rebuilt and
+re-rejected on every later run. Before the split existed, four oversized
+groups made **220 of 1004 matched listings permanently unreachable**.
+`tests/test_aggregation_loses_nothing.py` pins both properties — every input
+listing is emitted exactly once, and no rendered message can exceed the limit.
+
+Turn it off per chat with `/grouping 99`, or from the dashboard's Chat config
+page. `/grouping` with no argument explains it inside Telegram.
+
+The address is whatever the portal reports. Morizon usually gives street +
+district; Otodom and OLX give only city + district, so their listings rarely
+group at all — and a Morizon group can occasionally be district-wide rather
+than one building.
+
 Scoring is rule-based and configured in YAML:
 
 - price/m² vs median

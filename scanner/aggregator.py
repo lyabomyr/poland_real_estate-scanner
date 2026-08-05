@@ -12,10 +12,21 @@ from typing import Iterable, Iterator, List, Optional, Union
 from .models import Listing
 
 
+#: Most listings in one Telegram message. A group message runs ~140 chars per
+#: listing, and Telegram hard-rejects anything over 4096 — a 77-listing group
+#: rendered to 10 853 chars, so sendMessage returned 400, the group was never
+#: recorded as delivered, and it failed again identically on every later run.
+#: Those listings were unreachable forever. 20 keeps a message near 2 800
+#: chars with room for long URLs.
+MAX_PER_MESSAGE = 20
+
+
 @dataclass
 class ListingGroup:
     key: str                          # normalized grouping key (also used as label)
     items: List[Listing] = field(default_factory=list)
+    part: int = 1                     # 1-based index when a group is split
+    parts: int = 1                    # how many messages this group became
 
     @property
     def source(self) -> str:
@@ -23,7 +34,8 @@ class ListingGroup:
 
     @property
     def label(self) -> str:
-        return self.key
+        """Grouping key, with a part marker when the group spans messages."""
+        return self.key if self.parts == 1 else f"{self.key} ({self.part}/{self.parts})"
 
     @property
     def size(self) -> int:
@@ -51,10 +63,16 @@ def _group_key(l: Listing) -> Optional[str]:
 def group_listings(
     listings: Iterable[Listing],
     min_group_size: int = 3,
+    max_per_message: int = MAX_PER_MESSAGE,
 ) -> Iterator[ListingOrGroup]:
     """Yield individual listings OR groups of ``min_group_size``+ near-duplicates.
 
     Grouping is per source — we never mix Otodom+OLX+Morizon under one roll-up.
+
+    A location key with more than ``max_per_message`` listings is split across
+    several groups rather than crammed into one oversized message. Every
+    listing always ends up in exactly one yielded item: grouping changes how
+    listings are *packaged*, never whether they are sent.
     """
     by_source: dict = {}
     for l in listings:
@@ -74,8 +92,15 @@ def group_listings(
             yield l
 
         for key, items in buckets.items():
-            if len(items) >= min_group_size:
-                yield ListingGroup(key=key, items=items)
-            else:
+            if len(items) < min_group_size:
                 for l in items:
                     yield l
+                continue
+            chunks = [
+                items[i:i + max_per_message]
+                for i in range(0, len(items), max_per_message)
+            ]
+            for index, chunk in enumerate(chunks, start=1):
+                yield ListingGroup(
+                    key=key, items=chunk, part=index, parts=len(chunks),
+                )

@@ -43,7 +43,7 @@ def default_reply_keyboard() -> dict:
         "keyboard": [
             [{"text": "/status"}, {"text": "/help"}, {"text": "/dashboard"}],
             [{"text": "/config"}, {"text": "/decision_tree"}, {"text": "/urls"}],
-            [{"text": "/stats"}, {"text": "/kw list"}],
+            [{"text": "/stats"}, {"text": "/kw list"}, {"text": "/grouping"}],
             [{"text": "/pause"}, {"text": "/resume"}],
         ],
         "resize_keyboard": True,

@@ -61,7 +61,7 @@ def _card_to_listing(card) -> Optional[Listing]:
                     break
 
         loc_tag = card.select_one('[data-testid="location-date"]')
-        location = loc_tag.get_text(strip=True) if loc_tag else None
+        location = _clean_location(loc_tag.get_text(strip=True) if loc_tag else None)
 
         return Listing(
             source="olx",
@@ -76,6 +76,31 @@ def _card_to_listing(card) -> Optional[Listing]:
     except Exception as e:
         log.debug("olx: card parse error: %s", e)
         return None
+
+
+#: OLX packs place and posting time into one element, so the raw text reads
+#: "Kraków, Mistrzejowice - Odświeżono dnia 03 sierpnia 2026" or
+#: "Kraków, Nowa Huta - 04 sierpnia 2026" or "… - Dzisiaj o 09:12".
+#: Everything from the " - " separator onwards is the timestamp.
+_OLX_TIMESTAMP = re.compile(
+    r"\s+-\s+(?:Odświeżono|Dzisiaj|Wczoraj|\d{1,2}\s+\w+\s+\d{4}).*$"
+)
+
+
+def _clean_location(raw: Optional[str]) -> Optional[str]:
+    """Strip OLX's timestamp out of the location field.
+
+    Two things go wrong if it stays. It is shown to the user as part of the
+    address, and — worse — it lands in the cross-source dedup key:
+
+        577000|43|bieżanów-prokocim -
+
+    The key truncates to 20 chars, so the date eats the district and the same
+    flat stops matching its Otodom twin the day either ad is refreshed.
+    """
+    if not raw:
+        return None
+    return _OLX_TIMESTAMP.sub("", raw).strip() or None
 
 
 def _pick_image(card) -> Optional[str]:

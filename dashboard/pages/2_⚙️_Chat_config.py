@@ -140,11 +140,41 @@ with c4:
     _origin(override.min_build_year is not None, str(base_min_year or "off"))
 
 new_group = st.number_input(
-    "min_group_size", min_value=1, max_value=50, step=1,
+    "Group listings at the same address (min_group_size)",
+    min_value=1, max_value=99, step=1,
     value=int(eff.min_group_size()),
-    help="N+ listings on the same street collapse into one message.",
+    help=(
+        "Fewer messages, never fewer flats. When this many new listings from "
+        "the same portal share an address, they arrive as one message with a "
+        "line per flat instead of separately. Set 99 to switch it off."
+    ),
 )
 _origin(override.min_group_size is not None, str(base_group))
+with st.expander("What a grouped message looks like"):
+    st.markdown(
+        "Developers post every unit of a new building as its own ad. Without "
+        "grouping, twenty near-identical entries bury the one flat worth "
+        "looking at.\n\n"
+        "**Nothing is filtered out** — every flat keeps its own price, size, "
+        "score and link, sorted best score first:"
+    )
+    st.code(
+        "[morizon] 5 similar listings — Sołtysowska, Czyżyny\n"
+        "1. 579 510 zł · 41 m² · ★ 53 · otwórz\n"
+        "2. 594 935 zł · 41 m² · ★ 50 · otwórz\n"
+        "3. 601 470 zł · 51 m² · ★ 74 · otwórz\n"
+        "4. 604 200 zł · 42 m² · ★ 48 · otwórz\n"
+        "5. 610 000 zł · 45 m² · ★ 52 · otwórz",
+        language="text",
+    )
+    st.caption(
+        "More than 20 at one address arrive as several messages “(1/4)”, "
+        "“(2/4)” — Telegram rejects anything over 4096 characters, and a "
+        "rejected message would be a flat you never see. The address comes "
+        "from the portal: Morizon usually gives street + district, while "
+        "Otodom and OLX report only city + district, so their listings rarely "
+        "group at all."
+    )
 
 # ── Sources ───────────────────────────────────────────────────────────
 

@@ -54,9 +54,54 @@ telegram:
   parse_mode: HTML
 
 notifications:
-  # If N+ new listings from the same source share the same "street, district",
-  # collapse them into one Telegram message instead of N separate ones.
-  # Common when a developer lists every unit in a new building.
+  # ── Grouping: fewer messages, never fewer listings ───────────────────
+  #
+  # WHAT IT DOES
+  #   When several new listings from the SAME portal share the SAME location,
+  #   they arrive as one message with a line per flat instead of N separate
+  #   messages. Nothing is filtered out — grouping only changes the packaging.
+  #
+  # WHY
+  #   Developers post every unit of a new building as its own ad. Twenty
+  #   near-identical "41 m², Sołtysowska" entries would bury the one genuinely
+  #   interesting flat further down the chat.
+  #
+  # WHAT YOU SEE
+  #   Below the threshold (2 flats, min_group_size: 3) — two normal messages:
+  #
+  #       [morizon] 2 pokoje z garderobą — przytulne i sprytne
+  #       569 500 zł • 39 m² • 14 602 zł/m²
+  #       ★ 44/100 (+5% vs median)
+  #       📍 Rybałtowska, Prądnik Biały, Kraków
+  #       https://www.morizon.pl/oferta/...
+  #
+  #   At or above it (5 flats) — one message, every flat still listed with
+  #   its own price, size, score and link:
+  #
+  #       [morizon] 5 similar listings — Sołtysowska, Czyżyny
+  #       1. 579 510 zł · 41 m² · ★ 53 · otwórz
+  #       2. 594 935 zł · 41 m² · ★ 50 · otwórz
+  #       3. 601 470 zł · 51 m² · ★ 74 · otwórz
+  #       4. 604 200 zł · 42 m² · ★ 48 · otwórz
+  #       5. 610 000 zł · 45 m² · ★ 52 · otwórz
+  #
+  #   Sorted best score first. More than 20 at one location arrive as several
+  #   messages labelled "(1/4)", "(2/4)" — Telegram rejects anything over
+  #   4096 characters, and a rejected message is a listing you never see.
+  #
+  # TUNING
+  #   3  (default) — collapse from three identical-looking ads upwards
+  #   2  — aggressive: even a pair gets rolled up
+  #   99 — effectively off: every flat gets its own message. Use this if you
+  #        would rather scroll than risk skimming past a line in a roll-up.
+  #
+  #   Per chat: /reset min_group_size, or the dashboard's Chat config page.
+  #
+  # NOTE ON LOCATION ACCURACY
+  #   The key is whatever the portal gives us, usually "street, district".
+  #   Morizon sometimes omits the street, so a group can be district-wide
+  #   ("Nowa Huta, Kraków") rather than one building. Otodom and OLX report
+  #   only "city, district", so their listings almost never group at all.
   min_group_size: 3
 
   # Public URL of the Streamlit dashboard (deployed on Streamlit Community
