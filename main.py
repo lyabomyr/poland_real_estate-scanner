@@ -21,11 +21,8 @@ from typing import Optional
 from scanner.chat_repo import ChatConfigRepo
 from scanner.commands import CommandRouter
 from scanner.pipeline import MultiChatPipeline, build_chat_context
+from scanner.registry import SOURCE_REGISTRY
 from scanner.runtime_config import load_runtime_config
-from scanner.sources.komornik import KomornikSource
-from scanner.sources.morizon import MorizonSource
-from scanner.sources.olx import OlxSource
-from scanner.sources.otodom import OtodomSource
 from scanner.storage import SeenStore
 from scanner.telegram import (
     discover_chats,
@@ -34,14 +31,6 @@ from scanner.telegram import (
     send_greeting,
 )
 
-# Config-key → source class. Add a new source here + a block under
-# ``sources:`` in config.example.yml — nothing else needs to change.
-SOURCE_REGISTRY = {
-    "otodom": OtodomSource,
-    "olx": OlxSource,
-    "morizon": MorizonSource,
-    "komornik": KomornikSource,
-}
 
 
 # ── CLI ────────────────────────────────────────────────────────────────

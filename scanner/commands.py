@@ -25,6 +25,7 @@ import requests
 
 from .chat_config import ChatOverride, EffectiveConfig
 from .chat_repo import ChatConfigRepo
+from .registry import KNOWN_SOURCES
 from .introspection import (
     dashboard_url_from_cfg,
     format_config_report,
@@ -38,7 +39,8 @@ from .telegram import default_reply_keyboard, send_message
 log = logging.getLogger(__name__)
 
 _TG_API = "https://api.telegram.org/bot{token}/{method}"
-_KNOWN_SOURCES = ("otodom", "olx", "morizon", "komornik")
+# Single source of truth — see scanner/registry.py
+_KNOWN_SOURCES = KNOWN_SOURCES
 
 
 @dataclass

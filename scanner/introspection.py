@@ -9,6 +9,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import yaml
 
 from .chat_config import ChatOverride, EffectiveConfig
+from .registry import SOURCE_REGISTRY
 from .filters import ListingFilter
 from .scoring import DealScorer, ScoringWeights
 
@@ -84,7 +85,7 @@ def build_effective_snapshot(baseline_cfg: dict, override: ChatOverride) -> dict
             "fallback_chat_id": telegram.get("chat_id"),
             "bot_token": telegram.get("bot_token"),
         },
-        "sources": ec.enabled_source_configs(),
+        "sources": ec.enabled_source_configs(SOURCE_REGISTRY),
         "chat_override": _override_summary(override),
         "deduplication": {
             **_DEDUP_DESCRIPTION,
@@ -137,7 +138,7 @@ def public_urls(baseline_cfg: dict, override: ChatOverride) -> List[tuple[str, s
     dashboard_url = ec.dashboard_url()
     if dashboard_url:
         urls.append(("dashboard", redact_url(dashboard_url)))
-    for name, sconf in ec.enabled_source_configs().items():
+    for name, sconf in ec.enabled_source_configs(SOURCE_REGISTRY).items():
         url = sconf.get("url")
         if url:
             urls.append((f"source.{name}", redact_url(str(url))))

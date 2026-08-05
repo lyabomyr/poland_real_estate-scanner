@@ -76,7 +76,9 @@ class CommandTests(unittest.TestCase):
 
     def test_config_command_contains_keywords_urls_and_redacts_secrets(self) -> None:
         cfg = deepcopy(self.cfg)
-        cfg["sources"]["otodom"]["url"] += "&token=super-secret"
+        cfg["sources"]["otodom"]["url"] = (
+            "https://www.otodom.pl/pl/wyniki/sprzedaz/mieszkanie/x?token=super-secret"
+        )
         sent = self._run_command("/config", cfg=cfg)
         text = "\n".join(item["text"] for item in sent)
         self.assertIn("reject_keywords:", text)
@@ -96,7 +98,9 @@ class CommandTests(unittest.TestCase):
 
     def test_urls_command_lists_public_urls(self) -> None:
         cfg = deepcopy(self.cfg)
-        cfg["sources"]["otodom"]["url"] += "&api_key=shh"
+        cfg["sources"]["otodom"]["url"] = (
+            "https://www.otodom.pl/pl/wyniki/sprzedaz/mieszkanie/x?api_key=shh"
+        )
         sent = self._run_command("/urls", cfg=cfg)
         text = "\n".join(item["text"] for item in sent)
         self.assertIn("dashboard", text)
