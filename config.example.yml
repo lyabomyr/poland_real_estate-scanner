@@ -2,10 +2,13 @@ search:
   city: krakow
   min_area: 39           # m²
   max_price: 610000      # PLN
-  min_build_year: 1990   # skip listings whose build year is known and older than this
+  min_build_year: null   # off — we filter old-era buildings via keywords below instead
 
 filters:
-  # rejected if any of these appears in title/description/location (case-insensitive, word boundary)
+  # Rejected if any of these appears in title/description/location.
+  # Case-insensitive; matched as *prefix* on a word boundary — Polish
+  # inflection routinely appends 1–3 chars, so "udział" catches "udziału"
+  # / "udziałowy", "wielkopłyt" catches "wielkopłytowy/a/e", etc.
   reject_keywords:
     # social housing / regulated rent — you can't just "buy" one on the open market
     - "TBS"
@@ -20,8 +23,17 @@ filters:
     # we want a whole apartment, not a share of one
     - "udział"
     - "udzial"
-    - "współwłasnoś"      # "współwłasność" / "współwłasności"
+    - "współwłasnoś"
     - "wspolwlasnos"
+    # panel-block / khrushchyovka-era buildings — prefab concrete, tiny rooms,
+    # poor thermal performance. "wielka płyta" is the Polish name for the
+    # 1960s-80s prefab style ("велика панель" in UA).
+    - "wielka płyta"
+    - "wielkiej płyty"
+    - "wielkopłyt"
+    - "z lat 60"
+    - "z lat 70"
+    - "hruszcz"           # хрущовка / Khrushchyovka (rare in PL but harmless)
 
 telegram:
   bot_token: "REPLACE_WITH_BOT_TOKEN"
@@ -35,8 +47,104 @@ notifications:
   # Common when a developer lists every unit in a new building.
   min_group_size: 3
 
+scoring:
+  # Rule-based deal-quality score (0-100) attached to every matched listing.
+  # See scanner/scoring.py for the formula; every numeric knob is here.
+  #
+  # Formula:
+  #   score = base
+  #         + clamp(-delta_ppm2 / ppm2_full_at, ±1) * price_per_m2   # price signal
+  #         + area_sweet_bonus  if area ∈ [area_sweet_min .. max]    # area sweet-spot
+  #         + Σ hits(positive_keyword.weight)                        # amenities
+  #         - Σ hits(negative_keyword.weight)                        # red flags
+  #                                                     → clamp(0..100)
+  #
+  # The score + a list of "reasons" (e.g. "-15% vs median, area sweet-spot,
+  # +balkon, -parter") ships with every Telegram message so you can see
+  # why a listing got the number it did.
+  #
+  # Set enabled: false to skip scoring entirely (raw messages, no ★).
+  enabled: true
+
+  weights:
+    # Starting score. Shifts the whole distribution up/down — the final
+    # 0..100 clamp still applies. Rarely changed.
+    base: 50
+
+    # Cap on the price-vs-median term (± this value). Bigger = the price
+    # signal dominates over keyword amenities. Set to 0 to disable it
+    # entirely (equivalent to keyword-only scoring).
+    price_per_m2: 25
+
+    # What deviation from the run's median maps to the full ±cap above.
+    # 0.20 = a listing 20% below median gets the full +price_per_m2.
+    # Lower (0.10) = more sensitive to small price gaps; higher = flatter.
+    price_per_m2_full_at: 0.20
+
+    # Below this deviation we don't surface "%vs median" in reasons —
+    # avoids clutter for listings that are ~at market. Cosmetic only,
+    # doesn't affect the number.
+    ppm2_reason_threshold: 0.03
+
+    # Area sweet-spot. Kraków market: 40-60 m² is the most liquid segment
+    # (comfortable 2-room, still resellable). Widen or narrow to steer
+    # which apartment size gets a nudge.
+    area_sweet_bonus: 5
+    area_sweet_min:   40
+    area_sweet_max:   60
+
+    # Default weight per keyword hit (used for plain-string entries in the
+    # lists below). Override on a per-keyword basis with the
+    # ``{name: "…", weight: N}`` form.
+    keyword: 3
+
+    # Guard against noisy medians on quiet runs. Below this many
+    # price/m² samples across store + current run, we disable the
+    # price-vs-median signal and log "keyword-only signals".
+    min_median_sample: 10
+
+  # Amenities that make a listing more attractive. Two entry shapes:
+  #   - "balkon"                    → default weight (weights.keyword)
+  #   - {name: "taras", weight: 5}  → custom weight
+  #
+  # Matched as *prefix* on a word boundary — Polish inflection routinely
+  # appends 1-3 chars ("balkon" catches "balkonem/balkony/balkonu"). Where
+  # inflection removes the root's final vowel (winda → windą, klimatyzacja
+  # → klimatyzacji), list the shorter stem (wind, klimatyzac). Same rule
+  # applies to filters.reject_keywords.
+  positive_keywords:
+    - "balkon"                                  # covered by prefix: balkon/balkonem/balkony
+    - "loggia"                                  # covered balcony
+    - "taras"                                   # roof / ground terrace
+    - "garaż"                                   # garage
+    - "miejsce postojow"                        # dedicated parking spot
+    - "parking"
+    - "wind"                                    # winda / windy / windą (elevator)
+    - "klimatyzac"                              # air conditioning
+    - "przynależn"                              # przynależna piwnica — associated storage
+    - "wykończon"                               # finished / ready-to-live
+    - "po remoncie"                             # post-renovation
+    - "gotowy do zamieszkan"
+    - { name: "obniżon",       weight: 5 }      # "obniżona cena" — recent price drop → strong signal
+    - { name: "nowa oferta",   weight: 2 }      # fresh listing — small nudge
+
+  # Red flags. Same entry shapes; weight is *subtracted*.
+  negative_keywords:
+    - { name: "do remontu",      weight: 6 }    # requires renovation — expensive to fix
+    - { name: "wymaga remontu",  weight: 6 }
+    - "stan techniczny"                         # bureaucratic euphemism for "bad shape"
+    - { name: "parter",          weight: 4 }    # ground floor — privacy / security concerns
+    - "ostatnie piętr"                          # top floor — thermal issues under flat roof
+    - "bez windy"                               # no elevator (bad for floor 3+)
+    - "wysoki parter"                           # mezzanine — poor natural light
+
 storage:
   db_path: ./data/seen.db
+  # Rejected rows older than this get archived to CSV and deleted from the DB
+  # when you run `make prune` (or --prune, or the monthly prune workflow).
+  # Matched / duplicate rows are never touched — they're the ML dataset.
+  prune_rejected_days: 90
+  archive_dir: ./datasets
 
 http:
   user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"

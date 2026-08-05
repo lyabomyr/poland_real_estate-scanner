@@ -1,60 +1,202 @@
-"""SQLite-backed dedup store keyed by ``<source>:<listing_id>``.
+"""SQLite / Turso-backed dedup + archive store, keyed by ``<source>:<id>``.
+
+Backend selection
+-----------------
+Set ``TURSO_URL`` **and** ``TURSO_AUTH_TOKEN`` in the environment to use
+Turso (hosted libSQL). If either is missing we fall back to a local SQLite
+file at ``storage.db_path``. Local dev typically leaves both unset so it
+doesn't burn cloud reads while iterating.
 
 Design notes
 ------------
-* One table, one row per distinct listing. No history — a listing only ever
+* One row per distinct listing in ``seen``. No history — a listing only ever
   transitions "unseen → seen".
-* We store *both* matched and rejected listings so we don't re-evaluate them
-  every run (Otodom + OLX return the same ~180 items each 15-minute tick).
-* ``INSERT OR IGNORE`` makes ``add()`` idempotent — safe to call twice for the
-  same key without needing a pre-check.
-* File lives at ``storage.db_path`` (default ``./data/seen.db``). In GitHub
-  Actions the workflow commits it back to the repo so the next run picks up
-  where the previous one stopped.
+* We store matched, rejected AND cross-source-duplicate rows. Matched +
+  duplicate are kept forever (that's the ML dataset); rejected can be pruned
+  after N days by :meth:`prune_rejected` — CSV-archived first.
+* ``fuzzy_key`` column powers cross-source dedup (Otodom+Morizon listings of
+  the same physical apartment share a key — see :mod:`scanner.models`).
+* ``INSERT OR IGNORE`` makes ``add()`` idempotent — safe to call twice.
+* libSQL is wire-compatible with the sqlite3 dialect. We split the schema
+  into individual statements (no ``executescript``) because remote libSQL
+  doesn't support multi-statement execute.
 """
 
+import csv
+import os
 import sqlite3
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional, Set
 
 from .models import Listing
 
 
-class SeenStore:
-    _SCHEMA = """
+def _connect(path: str):
+    """Return a DB connection: Turso if creds in env, else local sqlite3."""
+    url = os.environ.get("TURSO_URL")
+    token = os.environ.get("TURSO_AUTH_TOKEN")
+    if url and token:
+        # Import lazily so the dep is only needed when actually used.
+        import libsql_experimental as libsql
+        return libsql.connect(database=url, auth_token=token)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    return sqlite3.connect(path)
+
+
+# Individual statements so this works on both sqlite3 (batches fine but we
+# don't rely on it) and libSQL remote (rejects multi-statement scripts).
+_SCHEMA_STMTS = [
+    """
     CREATE TABLE IF NOT EXISTS seen (
-        key           TEXT PRIMARY KEY,      -- "<source>:<id>"
+        key           TEXT PRIMARY KEY,       -- "<source>:<id>"
         source        TEXT NOT NULL,
         listing_id    TEXT NOT NULL,
         url           TEXT,
         title         TEXT,
         price         INTEGER,
         area          REAL,
-        status        TEXT NOT NULL,          -- 'matched' | 'rejected'
+        status        TEXT NOT NULL,          -- 'matched' | 'rejected' | 'duplicate'
         reject_reason TEXT,                   -- populated only for status='rejected'
+        fuzzy_key     TEXT,                   -- cross-source dedup — see models.py
         first_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE INDEX IF NOT EXISTS seen_source_idx ON seen(source);
-    CREATE INDEX IF NOT EXISTS seen_status_idx ON seen(status);
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS seen_source_idx ON seen(source)",
+    "CREATE INDEX IF NOT EXISTS seen_status_idx ON seen(status)",
+    "CREATE INDEX IF NOT EXISTS seen_fuzzy_idx  ON seen(fuzzy_key)",
+    # Which chats the bot has already announced its chat_id to. We use this
+    # to avoid re-sending the "Hi, your chat_id is X" message every 15 min
+    # for the rest of the update's 24h retention window.
     """
+    CREATE TABLE IF NOT EXISTS greeted_chats (
+        chat_id          TEXT PRIMARY KEY,
+        title            TEXT,
+        first_greeted_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
+    # Per-chat configuration overrides. Every enabled chat receives matches
+    # filtered/scored/routed through its own effective config. See
+    # scanner.chat_config for the merge semantics.
+    """
+    CREATE TABLE IF NOT EXISTS chat_configs (
+        chat_id    TEXT PRIMARY KEY,
+        title      TEXT,
+        enabled    INTEGER NOT NULL DEFAULT 1,
+        config     TEXT NOT NULL DEFAULT '{}',   -- JSON blob (ChatOverride)
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS chat_configs_enabled_idx ON chat_configs(enabled)",
+    # Per-chat emission tracking — "have we already sent listing L to chat C?"
+    # This is the multi-tenant analogue of ``seen``: seen tracks whether we
+    # ever saw a listing, chat_emissions tracks whether each individual chat
+    # was notified about it.
+    """
+    CREATE TABLE IF NOT EXISTS chat_emissions (
+        chat_id     TEXT NOT NULL,
+        listing_key TEXT NOT NULL,
+        sent_at     TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (chat_id, listing_key)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS chat_emissions_chat_idx ON chat_emissions(chat_id)",
+    # Bot commands ride on the same getUpdates channel as chat auto-discover.
+    # Storing processed update_ids here makes command handling exactly-once
+    # even across scanner restarts.
+    """
+    CREATE TABLE IF NOT EXISTS command_updates (
+        update_id    INTEGER PRIMARY KEY,
+        processed_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
+]
 
+
+class SeenStore:
     def __init__(self, path: str):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.path))
-        self.conn.executescript(self._SCHEMA)
+        self.conn = _connect(str(self.path))
+        for stmt in _SCHEMA_STMTS:
+            self.conn.execute(stmt)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns/indexes missing on databases created by an earlier version.
+
+        SQLite's ``CREATE TABLE IF NOT EXISTS`` doesn't retroactively add
+        columns to an existing table, so we introspect and ``ALTER TABLE``.
+
+        We call ``fetchall()`` rather than iterating the cursor — libSQL's
+        ``Cursor`` isn't iterable while ``sqlite3.Cursor`` is; ``fetchall``
+        works on both.
+        """
+        rows = self.conn.execute("PRAGMA table_info(seen)").fetchall()
+        existing_cols = {r[1] for r in rows}
+        if "fuzzy_key" not in existing_cols:
+            self.conn.execute("ALTER TABLE seen ADD COLUMN fuzzy_key TEXT")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS seen_fuzzy_idx ON seen(fuzzy_key)")
 
     def has(self, key: str) -> bool:
         cur = self.conn.execute("SELECT 1 FROM seen WHERE key = ? LIMIT 1", (key,))
         return cur.fetchone() is not None
 
-    def add(self, listing: Listing, status: str, reject_reason: Optional[str] = None) -> None:
+    # ── greeted_chats ──────────────────────────────────────────────────
+
+    def is_greeted(self, chat_id) -> bool:
+        cur = self.conn.execute(
+            "SELECT 1 FROM greeted_chats WHERE chat_id = ? LIMIT 1", (str(chat_id),)
+        )
+        return cur.fetchone() is not None
+
+    def record_greeted(self, chat_id, title: Optional[str] = None) -> None:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO greeted_chats (chat_id, title) VALUES (?, ?)",
+            (str(chat_id), title),
+        )
+        self.conn.commit()
+
+    def matched_price_per_m2(self) -> Iterator[float]:
+        """Yield price / area for every persisted matched listing.
+
+        Consumed by the scoring phase to build a stable median across runs —
+        keeps the "% vs median" signal meaningful even on quiet ticks that
+        only surface a handful of new listings.
+        """
+        cur = self.conn.execute(
+            "SELECT price, area FROM seen "
+            "WHERE status='matched' AND price IS NOT NULL "
+            "  AND area IS NOT NULL AND area > 0"
+        )
+        for price, area in cur.fetchall():
+            yield price / area
+
+    def emitted_fuzzy_keys(self) -> Set[str]:
+        """Return every ``fuzzy_key`` that has ever been emitted (status='matched').
+
+        Loaded once per run into a Python set — cross-source dedup is an O(1)
+        set-lookup after that.
+        """
+        cur = self.conn.execute(
+            "SELECT DISTINCT fuzzy_key FROM seen "
+            "WHERE fuzzy_key IS NOT NULL AND status = 'matched'"
+        )
+        return {row[0] for row in cur.fetchall()}
+
+    def add(
+        self,
+        listing: Listing,
+        status: str,
+        reject_reason: Optional[str] = None,
+        fuzzy_key: Optional[str] = None,
+    ) -> None:
         self.conn.execute(
             """
             INSERT OR IGNORE INTO seen
-                (key, source, listing_id, url, title, price, area, status, reject_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (key, source, listing_id, url, title, price, area,
+                 status, reject_reason, fuzzy_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 listing.dedup_key,
@@ -66,9 +208,66 @@ class SeenStore:
                 listing.area,
                 status,
                 reject_reason,
+                fuzzy_key,
             ),
         )
         self.conn.commit()
+
+    def prune_rejected(
+        self,
+        older_than_days: int,
+        export_dir: Optional[Path] = None,
+    ) -> int:
+        """Delete ``status='rejected'`` rows older than ``older_than_days``.
+
+        Rejected listings pile up faster than matches (Otodom returns ~180
+        items every 15 min, most already past the filter). After a few weeks
+        they're pure noise — the same listing won't come back, and if it did,
+        the filter would reject it again. Pruning keeps the hot DB lean.
+
+        We only touch ``rejected`` rows. ``matched`` and ``duplicate`` rows
+        are kept forever — they're the actual dataset for later ML work.
+
+        If ``export_dir`` is given, the doomed rows are dumped to
+        ``<export_dir>/<YYYY-MM-DD>_pruned_rejected.csv`` (append) before the
+        DELETE, so the data is recoverable.
+
+        Returns the number of rows deleted.
+        """
+        cutoff = f"-{int(older_than_days)} days"
+        cur = self.conn.execute(
+            "SELECT * FROM seen "
+            "WHERE status = 'rejected' AND first_seen_at < datetime('now', ?)",
+            (cutoff,),
+        )
+        cols = [c[0] for c in cur.description]
+        doomed = cur.fetchall()
+        if not doomed:
+            return 0
+
+        if export_dir is not None:
+            export_dir.mkdir(parents=True, exist_ok=True)
+            out = export_dir / f"{datetime.now().strftime('%Y-%m-%d')}_pruned_rejected.csv"
+            write_header = not out.exists()
+            with out.open("a", encoding="utf-8", newline="") as f:
+                w = csv.writer(f)
+                if write_header:
+                    w.writerow(cols)
+                w.writerows(doomed)
+
+        self.conn.execute(
+            "DELETE FROM seen "
+            "WHERE status = 'rejected' AND first_seen_at < datetime('now', ?)",
+            (cutoff,),
+        )
+        self.conn.commit()
+        # VACUUM reclaims disk space on local SQLite; on remote libSQL/Turso
+        # it's either a no-op or unsupported — silently swallow.
+        try:
+            self.conn.execute("VACUUM")
+        except Exception:
+            pass
+        return len(doomed)
 
     def close(self) -> None:
         self.conn.close()

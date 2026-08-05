@@ -24,6 +24,15 @@ reset-db:  ## delete the SQLite dedup store
 chats: config  ## list chats the bot has recently seen (for picking chat_id)
 	poetry run python main.py --print-chats
 
+prune: config  ## archive + delete rejected rows older than storage.prune_rejected_days
+	poetry run python main.py --prune
+
+lint:  ## static-check for unused imports / undefined names
+	poetry run pyflakes scanner/ main.py
+
+greet: config  ## announce chat_id in every chat the bot has newly joined
+	poetry run python main.py --greet-chats
+
 clean:  ## remove caches and virtualenv
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
 	poetry env remove --all 2>/dev/null || true

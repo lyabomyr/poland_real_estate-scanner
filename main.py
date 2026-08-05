@@ -1,41 +1,42 @@
 """Kraków real-estate scanner — CLI entrypoint.
 
-Pipeline (per source, in config order):
+The pipeline itself is multi-tenant: one run scans every enabled chat's
+configuration (see :mod:`scanner.pipeline`). This module just wires it up.
 
-    fetch  →  parse  →  filter  →  dedup  →  aggregate  →  notify
+CLI shape::
 
-`aggregate` groups near-duplicate listings from the same street into one
-Telegram message (common with developer bulk-listings). See
-:mod:`scanner.aggregator` for the grouping rule.
-
-Design choice: aggregation is **per-source**, not global. Rolling up an OLX
-match with a Morizon match at the same address would hide the fact that the
-same apartment is on multiple platforms — which is information a buyer wants.
+    python main.py                 # scan every enabled chat
+    python main.py --dry-run       # scan + print, no persistence, no Telegram
+    python main.py --prune         # archive + delete old rejected rows and exit
+    python main.py --print-chats   # list chats the bot has recently seen
+    python main.py --greet-chats   # announce chat_id in newly-joined chats and exit
 """
 
 import argparse
 import logging
 import sys
 from pathlib import Path
-from typing import List
 
 import yaml
 
-from scanner.aggregator import ListingGroup, group_listings
-from scanner.filters import ListingFilter
-from scanner.format import format_group_plain, format_plain
-from scanner.sources.base import BaseSource
+from scanner.chat_config import ChatOverride
+from scanner.chat_repo import ChatConfigRepo
+from scanner.commands import CommandRouter
+from scanner.pipeline import MultiChatPipeline, build_chat_context
 from scanner.sources.bzp import BzpSource
 from scanner.sources.komornik import KomornikSource
 from scanner.sources.morizon import MorizonSource
 from scanner.sources.olx import OlxSource
 from scanner.sources.otodom import OtodomSource
 from scanner.storage import SeenStore
-from scanner.telegram import TelegramNotifier, discover_chats
+from scanner.telegram import (
+    discover_chats,
+    find_new_chat_memberships,
+    send_greeting,
+)
 
-# Config-key → source class. To add a new source, drop a module in
-# scanner/sources/, subclass BaseSource, add it here, add its block in
-# config.example.yml. That's the entire registration surface.
+# Config-key → source class. Add a new source here + a block under
+# ``sources:`` in config.example.yml — nothing else needs to change.
 SOURCE_REGISTRY = {
     "otodom": OtodomSource,
     "olx": OlxSource,
@@ -50,47 +51,24 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def build_sources(cfg: dict) -> List[BaseSource]:
-    """Instantiate every enabled source with its per-source config + shared HTTP settings.
+# ── CLI ────────────────────────────────────────────────────────────────
 
-    Everything under ``sources.<name>`` (except ``enabled``) is passed as
-    kwargs to the source constructor. This means adding a new config knob to
-    a source needs zero changes here — just accept it in the constructor.
-    """
-    http = cfg.get("http") or {}
-    common = {
-        "user_agent": http.get("user_agent", ""),
-        "timeout": http.get("timeout", 30),
-        "delay": http.get("delay_seconds", 2),
-    }
-    sources: List[BaseSource] = []
-    for key, sconf in (cfg.get("sources") or {}).items():
-        if not sconf or not sconf.get("enabled", True):
-            continue
-        cls = SOURCE_REGISTRY.get(key)
-        if not cls:
-            logging.warning("unknown source in config: %s", key)
-            continue
-        params = {k: v for k, v in sconf.items() if k != "enabled"}
-        params.update(common)
-        sources.append(cls(**params))
-    return sources
+def _build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Kraków real-estate scanner")
+    p.add_argument("--config", default="config.yml")
+    p.add_argument("--dry-run", action="store_true",
+                   help="don't send Telegram messages, don't persist state")
+    p.add_argument("--print-chats", action="store_true",
+                   help="print chats the bot has recently seen (from getUpdates) and exit")
+    p.add_argument("--prune", action="store_true",
+                   help="archive + delete rejected rows older than storage.prune_rejected_days")
+    p.add_argument("--greet-chats", action="store_true",
+                   help="announce chat_id in newly-joined chats, then exit")
+    return p
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Kraków real-estate scanner")
-    parser.add_argument("--config", default="config.yml")
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="don't send Telegram messages and don't persist seen state",
-    )
-    parser.add_argument(
-        "--print-chats",
-        action="store_true",
-        help="print chats the bot has recently seen (from getUpdates) and exit",
-    )
-    args = parser.parse_args()
+    args = _build_arg_parser().parse_args()
 
     if not Path(args.config).exists():
         print(
@@ -107,114 +85,69 @@ def main() -> int:
     )
     log = logging.getLogger("main")
 
-    search = cfg["search"]
-    flt = ListingFilter(
-        min_area=search["min_area"],
-        max_price=search["max_price"],
-        min_build_year=search.get("min_build_year"),
-        reject_keywords=(cfg.get("filters") or {}).get("reject_keywords", []),
-    )
     tg_cfg = cfg.get("telegram") or {}
     bot_token = tg_cfg.get("bot_token", "")
-    chat_id = tg_cfg.get("chat_id", "")
 
     if args.print_chats:
-        return _print_chats(bot_token, log)
+        return _handle_print_chats(bot_token, log)
+    if args.prune:
+        return _handle_prune(cfg, log)
 
-    # If chat_id was left blank / placeholder, try to auto-discover it via
-    # Telegram's getUpdates. Works only when the bot has recent activity in the
-    # target chat (see discover_chats() docs). Falls through with a warning
-    # otherwise — the run continues, matches just print to console.
-    if bot_token and not bot_token.startswith("REPLACE") and (
-        not chat_id or chat_id.startswith("REPLACE")
-    ):
-        chats = _try_discover(bot_token, log)
-        if len(chats) == 1:
-            chat_id = str(chats[0]["id"])
-            log.info("auto-discovered chat_id=%s (%s)", chat_id, chats[0]["title"])
-        elif len(chats) > 1:
-            log.error("multiple chats found — pin one in config.telegram.chat_id:")
-            for c in chats:
-                log.error("  %-16s  %-10s  %s", c["id"], c["type"], c["title"])
-        else:
-            log.warning(
-                "no chats found via getUpdates — send /start to the bot in a "
-                "direct chat, or add it to a group and post any message, then retry."
-            )
+    storage_cfg = cfg.get("storage") or {}
+    with SeenStore(storage_cfg.get("db_path", "./data/seen.db")) as store:
+        repo = ChatConfigRepo(store)
 
-    store = SeenStore((cfg.get("storage") or {}).get("db_path", "./data/seen.db"))
-    notifier = TelegramNotifier(
-        bot_token=bot_token,
-        chat_id=chat_id,
-        parse_mode=tg_cfg.get("parse_mode", "HTML"),
-    )
-    sources = build_sources(cfg)
+        # 1) Greet newly-joined chats + auto-bootstrap chat_configs rows.
+        if not args.dry_run or args.greet_chats:
+            _greet_new_chats(bot_token, store, repo, log)
+        if args.greet_chats:
+            return 0
 
-    if not notifier.is_configured():
-        log.info("telegram not configured — matches will be printed to console only")
+        # 2) Process pending Telegram commands (writes chat_configs overrides).
+        if not args.dry_run:
+            handled = CommandRouter(bot_token, repo, cfg).process_pending()
+            if handled:
+                log.info("commands: processed %d update(s)", handled)
 
-    notif_cfg = cfg.get("notifications") or {}
-    min_group_size = int(notif_cfg.get("min_group_size", 3))
+        # 3) If chat_configs is empty (fresh install), seed from telegram.chat_id.
+        _bootstrap_from_yaml_if_empty(cfg, repo, log)
 
-    stats = {"seen": 0, "already_seen": 0, "rejected": 0, "matched": 0, "sent": 0}
-    for src in sources:
-        log.info("=== scanning %s ===", src.name)
-        matched_here: list = []
-        try:
-            for listing in src.scan():
-                stats["seen"] += 1
-                if store.has(listing.dedup_key):
-                    stats["already_seen"] += 1
-                    continue
-                ok, reason = flt.accepts(listing)
-                if not ok:
-                    log.debug("reject %s: %s (%s)", listing.url, reason, listing.title)
-                    stats["rejected"] += 1
-                    # Persist rejections too — cheap, prevents re-evaluating the
-                    # same listing every 15 minutes forever.
-                    if not args.dry_run:
-                        store.add(listing, status="rejected", reject_reason=reason)
-                    continue
-                stats["matched"] += 1
-                if not args.dry_run:
-                    store.add(listing, status="matched")
-                matched_here.append(listing)
-        except Exception:
-            log.exception("source %s crashed", src.name)
+        # 4) Build one ChatContext per enabled chat and run the pipeline.
+        chats = [c for c in repo.list_enabled() if not c.override.paused]
+        if not chats:
+            log.info("no active chats — set telegram.chat_id in config.yml or add the bot to a group")
+            return 0
 
-        # Group near-duplicates within this source only, then emit each item
-        # (either a single listing or a rolled-up group) once.
-        for item in group_listings(matched_here, min_group_size=min_group_size):
-            if isinstance(item, ListingGroup):
-                print(format_group_plain(item))
-                print("-" * 60)
-                if not args.dry_run and notifier.send_group(item):
-                    stats["sent"] += 1
-            else:
-                print(format_plain(item))
-                print("-" * 60)
-                if not args.dry_run and notifier.send(item):
-                    stats["sent"] += 1
+        contexts = [
+            build_chat_context(row, cfg, bot_token, SOURCE_REGISTRY) for row in chats
+        ]
+        stats = MultiChatPipeline(contexts, store, repo, dry_run=args.dry_run).run()
 
-    store.close()
-    log.info("done: %s", stats)
+    log.info("done: %s", stats.as_dict())
     return 0
 
 
-def _try_discover(bot_token: str, log: logging.Logger) -> list:
-    try:
-        return discover_chats(bot_token)
-    except Exception as e:
-        log.warning("chat auto-discover failed: %s", e)
-        return []
+# ── one-shot CLI handlers ──────────────────────────────────────────────
+
+def _handle_prune(cfg: dict, log: logging.Logger) -> int:
+    storage_cfg = cfg.get("storage") or {}
+    days = int(storage_cfg.get("prune_rejected_days", 90))
+    archive_dir = Path(storage_cfg.get("archive_dir", "./datasets"))
+    with SeenStore(storage_cfg.get("db_path", "./data/seen.db")) as store:
+        n = store.prune_rejected(older_than_days=days, export_dir=archive_dir)
+    log.info("pruned %d rejected rows older than %d days (archive: %s)", n, days, archive_dir)
+    return 0
 
 
-def _print_chats(bot_token: str, log: logging.Logger) -> int:
-    """`--print-chats` handler: list chats the bot has recently seen and exit."""
+def _handle_print_chats(bot_token: str, log: logging.Logger) -> int:
     if not bot_token or bot_token.startswith("REPLACE"):
         print("bot_token not set in config.yml", file=sys.stderr)
         return 2
-    chats = _try_discover(bot_token, log)
+    try:
+        chats = discover_chats(bot_token)
+    except Exception as e:
+        log.warning("chat auto-discover failed: %s", e)
+        chats = []
     if not chats:
         print(
             "no chats found. Send any message to the bot in a direct chat, "
@@ -226,6 +159,57 @@ def _print_chats(bot_token: str, log: logging.Logger) -> int:
     for c in chats:
         print(f"{c['id']:<16}  {c['type']:<10}  {c['title']}")
     return 0
+
+
+# ── helpers ────────────────────────────────────────────────────────────
+
+def _greet_new_chats(
+    bot_token: str,
+    store: SeenStore,
+    repo: ChatConfigRepo,
+    log: logging.Logger,
+) -> None:
+    """Post chat_id back to freshly-joined chats + register them in ``chat_configs``.
+
+    Two side-effects intentionally live together:
+
+    * :meth:`SeenStore.record_greeted` — one greeting per chat, ever.
+    * :meth:`ChatConfigRepo.upsert` — makes new groups automatically appear
+      as enabled scan targets. No manual "add chat" step needed.
+    """
+    if not bot_token or bot_token.startswith("REPLACE"):
+        return
+    try:
+        chats = find_new_chat_memberships(bot_token)
+    except Exception as e:
+        log.warning("greet: getUpdates failed: %s", e)
+        return
+    for c in chats:
+        cid = c["id"]
+        if store.is_greeted(cid):
+            continue
+        if send_greeting(bot_token, cid, c["title"]):
+            store.record_greeted(cid, c["title"])
+            # Auto-register with empty overrides (inherits everything from YAML).
+            if not repo.get(cid):
+                repo.upsert(cid, c["title"], ChatOverride(), enabled=True)
+            log.info("greet: announced + registered chat_id=%s (%s)", cid, c["title"])
+
+
+def _bootstrap_from_yaml_if_empty(cfg: dict, repo: ChatConfigRepo, log: logging.Logger) -> None:
+    """Seed ``chat_configs`` from ``telegram.chat_id`` on first run.
+
+    Prevents "why does the scanner do nothing on a fresh DB?" — if the user
+    put a chat_id in YAML but never DMed the bot (no getUpdates event),
+    still route matches to it.
+    """
+    if repo.list_all():
+        return
+    chat_id = ((cfg.get("telegram") or {}).get("chat_id") or "").strip()
+    if not chat_id or chat_id.startswith("REPLACE"):
+        return
+    repo.upsert(chat_id, title="bootstrap (from YAML)", override=ChatOverride(), enabled=True)
+    log.info("bootstrap: registered chat_id=%s from config.yml", chat_id)
 
 
 if __name__ == "__main__":

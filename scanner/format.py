@@ -40,11 +40,28 @@ def _area_str(l: Listing) -> str:
     return f"{l.area:g} m²" if l.area else "—"
 
 
+def _score_str(l: Listing) -> str:
+    """Compact "★ 78/100 (…reasons…)" — empty if no score attached."""
+    if not l.score:
+        return ""
+    reasons = ", ".join(l.score.reasons)
+    return f"★ {l.score.value}/100 ({reasons})" if reasons else f"★ {l.score.value}/100"
+
+
+def _sort_key(l: Listing):
+    """Prefer higher score, then lower price. Listings without a score sort last."""
+    score = l.score.value if l.score else -1
+    return (-score, l.price or 10 ** 9)
+
+
 def format_plain(l: Listing) -> str:
     parts = [f"[{l.source}] {l.title or '(no title)'}"]
     row = _price_area_row(l)
     if row:
         parts.append(row)
+    score = _score_str(l)
+    if score:
+        parts.append(score)
     if l.location:
         parts.append(f"loc: {l.location}")
     if l.build_year:
@@ -58,6 +75,9 @@ def format_html(l: Listing) -> str:
     row = _price_area_row(l)
     if row:
         parts.append(row)
+    score = _score_str(l)
+    if score:
+        parts.append(_esc(score))
     if l.location:
         parts.append(f"📍 {_esc(l.location)}")
     if l.build_year:
@@ -69,8 +89,9 @@ def format_html(l: Listing) -> str:
 def format_group_plain(g: ListingGroup) -> str:
     header = f"[{g.source}] {g.size} similar — {g.label}"
     lines = [header]
-    for l in sorted(g.items, key=lambda x: x.price or 0):
-        lines.append(f"  • {_price_str(l)} · {_area_str(l)} · {l.url}")
+    for l in sorted(g.items, key=_sort_key):
+        score = f" · ★ {l.score.value}" if l.score else ""
+        lines.append(f"  • {_price_str(l)} · {_area_str(l)}{score} · {l.url}")
     return "\n".join(lines)
 
 
@@ -80,8 +101,11 @@ def format_group_html(g: ListingGroup) -> str:
         f"{_esc(g.label.title())}"
     )
     lines = [header]
-    for i, l in enumerate(sorted(g.items, key=lambda x: x.price or 0), start=1):
+    for i, l in enumerate(sorted(g.items, key=_sort_key), start=1):
+        score = f" · ★ {l.score.value}" if l.score else ""
         price = _price_str(l)
         area = _area_str(l)
-        lines.append(f'{i}. {price} · {area} · <a href="{_esc(l.url)}">otwórz</a>')
+        lines.append(
+            f'{i}. {price} · {area}{score} · <a href="{_esc(l.url)}">otwórz</a>'
+        )
     return "\n".join(lines)

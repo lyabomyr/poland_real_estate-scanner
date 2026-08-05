@@ -9,3 +9,4 @@ dist/
 data/*
 !data/.gitkeep
 config.yml
+.streamlit/secrets.toml

@@ -22,10 +22,13 @@ class ListingFilter:
         self.min_area = min_area
         self.max_price = max_price
         self.min_build_year = min_build_year
-        # Word-boundary via lookarounds instead of \b so unicode chars in
-        # Polish keywords ("półpiwnica") don't lose their non-word neighbours.
+        # Prefix-match on a word boundary — Polish inflection routinely
+        # appends 1–3 chars ("udział" → "udziału", "wielkopłyt" →
+        # "wielkopłytowy"). A strict full-word match would miss all these.
+        # Lookbehind (not ``\b``) preserves unicode-adjacent non-word chars.
+        # Same convention as :mod:`scanner.scoring` — keep them consistent.
         self._reject_patterns = [
-            re.compile(rf"(?<!\w){re.escape(k)}(?!\w)", re.IGNORECASE)
+            re.compile(rf"(?<!\w){re.escape(k)}", re.IGNORECASE)
             for k in reject_keywords
         ]
 

@@ -8,7 +8,7 @@ message; the run just takes a bit longer.
 
 import logging
 import time
-from typing import List
+from typing import List, Optional
 
 import requests
 
@@ -17,6 +17,82 @@ from .format import format_group_html, format_html
 from .models import Listing
 
 log = logging.getLogger(__name__)
+
+
+def find_new_chat_memberships(bot_token: str, timeout: int = 10) -> List[dict]:
+    """Return chats where the bot has *become* a member/admin recently.
+
+    Reads ``my_chat_member`` updates from getUpdates and keeps only
+    transitions into an active state (``member`` / ``administrator``). Used
+    by the auto-greet feature: the scanner announces the chat's id back to
+    the group so the user can pin it in :envvar:`TG_CHAT_ID` without
+    installing a helper bot.
+
+    Only sees events from the last ~24 h — Telegram's default retention.
+    """
+    if not bot_token or bot_token.startswith("REPLACE"):
+        return []
+    r = requests.get(
+        f"https://api.telegram.org/bot{bot_token}/getUpdates",
+        params={"limit": 100},
+        timeout=timeout,
+    )
+    r.raise_for_status()
+    data = r.json()
+    if not data.get("ok"):
+        return []
+
+    out = {}
+    for upd in data.get("result", []) or []:
+        mcm = upd.get("my_chat_member")
+        if not mcm:
+            continue
+        new_status = (mcm.get("new_chat_member") or {}).get("status")
+        if new_status not in ("member", "administrator"):
+            continue
+        chat = mcm.get("chat") or {}
+        cid = chat.get("id")
+        if cid is None or cid in out:
+            continue
+        out[cid] = {
+            "id": cid,
+            "type": chat.get("type"),
+            "title": chat.get("title") or chat.get("username") or "(no title)",
+        }
+    return list(out.values())
+
+
+def send_greeting(bot_token: str, chat_id, title: Optional[str] = None) -> bool:
+    """Post a "here's your chat_id" message to the given chat.
+
+    The whole point of this helper is user-facing: a fresh group where the
+    bot was just added gets a message with its ``chat_id`` in a copy-friendly
+    format so the user can plug it into their :envvar:`TG_CHAT_ID` secret.
+    """
+    if not bot_token or bot_token.startswith("REPLACE"):
+        return False
+    title_line = f"\n<i>{title}</i>" if title else ""
+    text = (
+        "👋 <b>Kraków flats scanner</b> is here."
+        f"{title_line}\n\n"
+        f"Chat ID: <code>{chat_id}</code>"
+    )
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            data={
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": "true",
+            },
+            timeout=15,
+        )
+        r.raise_for_status()
+        return True
+    except Exception as e:
+        log.error("greet: send to %s failed: %s", chat_id, e)
+        return False
 
 
 def discover_chats(bot_token: str, timeout: int = 10) -> List[dict]:

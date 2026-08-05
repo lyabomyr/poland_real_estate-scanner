@@ -1,16 +1,20 @@
-name: scan
+name: prune
+
+# Runs once a month on the 1st at 03:00 UTC. Purely opportunistic — the
+# scanner works fine without it, this just keeps `seen` from bloating with
+# stale rejected rows (basement flats, TBS, over-budget listings) after
+# several months of scans. Matched / duplicate rows are never touched.
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # every 15 minutes (GitHub may delay by 5-15 min in peak hours)
-  workflow_dispatch:          # manual "Run workflow" button
+    - cron: "0 3 1 * *"
+  workflow_dispatch:
 
-concurrency:
-  group: scan
-  cancel-in-progress: false   # never cancel a run mid-flight
+permissions:
+  contents: write             # for committing the archive CSVs back
 
 jobs:
-  scan:
+  prune:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -48,12 +52,16 @@ jobs:
           p.write_text(text, encoding="utf-8")
           PY
 
-      - name: Run scanner
-        # TURSO_URL + TURSO_AUTH_TOKEN switch the store to hosted libSQL —
-        # nothing to commit back after the run because the cloud DB persists
-        # everything. Unset them if you want the workflow to use a local
-        # SQLite file committed to the repo instead.
+      - name: Prune
         env:
           TURSO_URL:        ${{ secrets.TURSO_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
-        run: poetry run python main.py
+        run: poetry run python main.py --prune
+
+      - name: Commit archive CSVs
+        run: |
+          git config user.name  "scanner-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add datasets/
+          git diff --cached --quiet || git commit -m "monthly prune: archive rejected rows [skip ci]"
+          git push

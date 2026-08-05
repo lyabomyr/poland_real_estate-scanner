@@ -2,13 +2,19 @@
 
 Cron-driven scanner for buying apartments in Kraków under a fixed budget.
 Runs every 15 min on GitHub Actions, checks 5 real-estate sources,
-deduplicates, filters, and pushes fresh matches to a Telegram group.
+deduplicates, filters, scores, and pushes fresh matches to Telegram —
+**one message per apartment, per interested chat**.
 
 - **Live sources**: Otodom, OLX, Morizon, licytacje.komornik.pl (bailiff
   auctions), BZP / eZamówienia (public-procurement API)
-- **Cost**: $0 — public GitHub Actions minutes are unlimited on public repos
-- **Persistence**: SQLite (`data/seen.db`) committed back to the repo after
-  each run
+- **Multi-tenant**: many chats, each with its own filter/keyword/source
+  overrides. Add the bot to a new group → it self-registers → tune the
+  chat's config via `/set` commands in the group or the Streamlit UI.
+- **UI**: Streamlit dashboard on Streamlit Community Cloud — read-only
+  KPIs + charts + per-chat override editor.
+- **Cost**: $0 — Turso free tier, Streamlit Cloud free tier, GitHub
+  Actions unlimited minutes on public repos.
+- **Persistence**: hosted libSQL (Turso) with local-SQLite fallback for dev.
 
 ## What we look for
 
@@ -66,6 +72,60 @@ throw away every komornik listing.
   parked or dead. The private-aggregator syndyk niche collapsed after KRZ
   centralised bankruptcy notices.
 
+## Deal-quality scoring
+
+Every listing gets a rule-based 0–100 score with a human-readable breakdown:
+
+```
+[morizon] 2-pokojowe mieszkanie z balkonem po remoncie
+598 955 zł • 41 m² • 14 610 zł/m²
+★ 73/100 (-12% vs median, area sweet-spot, +balkon, +po remoncie)
+📍 Centralna, Czyżyny, Kraków, małopolskie
+```
+
+Signals (see [`scanner/scoring.py`](scanner/scoring.py)):
+
+| signal | weight | notes |
+|---|---|---|
+| **price / m² vs run median** | ±25 pts | Median is computed from all persisted matches + this run; needs ≥ 10 samples, else falls back to keyword-only |
+| **area sweet-spot** (40–60 m²) | +5 pts | Most liquid segment |
+| **positive keywords** | +3 each | `balkon`, `taras`, `garaż`, `wind`, `klimatyzac`, `przynależn`, `po remoncie`… (tunable in config) |
+| **negative keywords** | -3 each | `do remontu`, `parter`, `ostatnie piętr`, `bez windy`… |
+
+Scores drive **sort order**: within an aggregated group, best-scoring listings
+come first, so the top link in a "28 similar" message is the best deal. Score
+and its reasons are included in both console and Telegram output.
+
+Keywords are matched as **prefixes on a word boundary** (Polish is heavily
+inflected — `balkon` catches `balkonem`, `balkony`, `balkonu`). When the
+inflection changes the root vowel (`winda → windą`), list the shorter stem
+(`wind`) — the config comments call this out for each keyword.
+
+## Cross-source deduplication
+
+The same apartment often shows up on Otodom, OLX AND Morizon at once — with
+different listing ids but the same price, area and street. To avoid three
+notifications for one flat, every :class:`Listing` computes a **fuzzy key**:
+
+```
+fuzzy_key = "<price>|<int(area)>|<first-location-part>"
+```
+
+Sources are checked in registry order (`otodom → olx → morizon → komornik → bzp`)
+— the first source to emit for a given fuzzy key wins; subsequent matches are
+persisted with `status='duplicate'` and never notified. Key is `NULL` (so
+dedup is skipped) when price / area / location is missing, so komornik
+listings with unpublished areas still come through fine.
+
+Cross-source dedup is **persistent** — matched fuzzy keys survive in
+`data/seen.db` across runs. If Otodom emits an apartment today and Morizon
+picks up the same listing tomorrow, tomorrow's Morizon match is skipped
+silently.
+
+Real-world numbers from one live run: 179 raw hits → 16 rejected by filters
+→ **9 cross-source duplicates skipped** → 154 emitted (further collapsed by
+per-source aggregation below).
+
 ## Aggregation of similar listings
 
 When a developer lists every unit in a new building as a separate ad (28
@@ -86,13 +146,145 @@ listings go out as individual messages. Aggregation is **per source** — an
 Otodom match and a Morizon match at the same address stay separate on purpose
 (the same apartment on two platforms is useful signal, not noise).
 
+## Multi-tenancy — many chats, each with its own config
+
+Each chat that has the bot as a member gets a row in the `chat_configs`
+table. The row's `config` column is a JSON blob (:class:`ChatOverride`)
+listing the fields that chat **overrides** on top of the YAML baseline —
+`max_price`, `min_area`, disabled sources, custom source URLs, extra
+positive/negative/reject keywords, scoring weights, `paused` flag.
+
+The scanner builds one effective config per chat at the start of every
+scan (see `scanner/chat_config.py :: EffectiveConfig`) and runs the full
+pipeline per chat: filter → cross-source dedup → score → aggregate →
+emit. Per-chat emission is tracked in `chat_emissions` so a listing that
+was sent to chat A won't be resent when chat B goes live later.
+
+Two UIs to tune a chat's overrides:
+
+* **Telegram commands** — send `/help` in the chat, all commands are
+  listed. Highlights: `/max_price 700000`, `/min_area 45`,
+  `/source olx off`, `/source otodom url https://…`, `/kw + balkon`,
+  `/kw - do remontu 6`, `/pause`, `/resume`, `/status`, `/reset all`.
+  Commands are processed on the next scan (≤ 15 min cron latency);
+  every reply is delivered by the bot.
+* **Streamlit dashboard** — [`dashboard/`](dashboard/README.md) has a
+  form for every override, plus a raw-JSON preview of what actually gets
+  persisted. Also shows KPIs, source mix, reject-reason breakdown,
+  price/m² distribution, per-chat delivery counts, and a sortable
+  listings table.
+
+## Streamlit dashboard
+
+See [`dashboard/README.md`](dashboard/README.md) for local run + deploy
+instructions. In short:
+
+```bash
+TURSO_URL=… TURSO_AUTH_TOKEN=… poetry run streamlit run dashboard/app.py
+```
+
+For Streamlit Community Cloud (free) — set `dashboard/app.py` as entry,
+add the two `TURSO_*` values as secrets in the app settings, deploy.
+
+## Auto-announce chat_id on join
+
+When you add `@KrakowFlatsBot` to a new group, the next scheduled scan (or
+`make greet`) posts a message into that group with its `chat_id`:
+
+```
+👋 Kraków flats scanner is here.
+
+Chat ID: -5406344287
+
+Save this as TG_CHAT_ID in the repo's Settings → Secrets and
+variables → Actions to route apartment matches to this chat.
+```
+
+Announced chats are recorded in the `greeted_chats` table so the message
+fires **at most once per chat** — running `make greet` again is a no-op.
+Beats installing a third-party bot just to read the id.
+
+## Cleanup / archival
+
+Rejected rows accumulate quickly (Otodom returns ~180 items every 15 min,
+most already past the filter). After a few weeks they add nothing — the same
+listings won't come back, and even if they did the filter would reject them
+again. To keep the hot DB lean:
+
+```bash
+make prune                   # archive-then-delete rejected rows > 90 days old
+```
+
+Config knobs (defaults in `config.example.yml`):
+
+```yaml
+storage:
+  prune_rejected_days: 90    # threshold
+  archive_dir: ./datasets    # where the CSV dump goes
+```
+
+**Only `status='rejected'` rows are pruned**. `matched` and `duplicate` rows
+are kept **forever** — they're the ML dataset. Before deletion the doomed rows
+are appended to `datasets/<YYYY-MM-DD>_pruned_rejected.csv` (full column dump,
+recoverable), then `VACUUM` reclaims disk space on SQLite.
+
+There's a scheduled workflow at
+[`.github/workflows/prune.yml`](.github/workflows/prune.yml) that runs on the
+**1st of every month at 03:00 UTC** and commits the archive back to the repo.
+Manual dispatch via **Actions → prune → Run workflow** any time.
+
+## Storage — local SQLite or Turso cloud
+
+[`scanner/storage.py`](scanner/storage.py) picks the backend at runtime from
+env vars:
+
+| Env vars present            | Backend                                       |
+|-----------------------------|-----------------------------------------------|
+| `TURSO_URL` + `TURSO_AUTH_TOKEN` | Hosted libSQL (Turso). No local file.    |
+| *(neither set)*             | Local `sqlite3` file at `storage.db_path`.    |
+
+Local dev normally leaves both unset — you don't want to burn cloud
+reads/writes while iterating on parsers. The GitHub Actions workflows set them
+via secrets so the cron scan writes to Turso and no commit-back is needed.
+
+### Turso quick-start
+
+```bash
+# 1. Install the Turso CLI (macOS)
+brew install tursodatabase/tap/turso
+
+# 2. Auth + create the database
+turso auth signup
+turso db create krakow-real-estate
+
+# 3. Get the two values you need
+turso db show krakow-real-estate --url                    # → TURSO_URL
+turso db tokens create krakow-real-estate --expiration none  # → TURSO_AUTH_TOKEN
+```
+
+Save both as **repository secrets** (Settings → Secrets and variables →
+Actions → New repository secret): `TURSO_URL` and `TURSO_AUTH_TOKEN`. Both
+scan and prune workflows already pass them through — no workflow edit
+needed.
+
+Free tier: 9 GB storage / 1 B row reads per month — years of runway for
+this workload.
+
+### Inspecting the cloud DB from your laptop
+
+```bash
+turso db shell krakow-real-estate     # sqlite3-style REPL against the cloud DB
+turso db shell krakow-real-estate 'SELECT source, COUNT(*) FROM seen GROUP BY 1'
+turso db dump krakow-real-estate      # full SQL dump for offline analysis
+```
+
 ## Dedup
 
 Everything the scanner has ever *seen* is stored in SQLite at
 `storage.db_path` (default `./data/seen.db`), keyed as
 `<source>:<listing_id>`. Table `seen` also records `url`, `title`, `price`,
-`area`, `status` (`matched` / `rejected`), `reject_reason`, `first_seen_at`
-— useful for ad-hoc audits:
+`area`, `status` (`matched` / `rejected` / `duplicate`), `reject_reason`,
+`fuzzy_key`, and `first_seen_at` — useful for ad-hoc audits:
 
 ```bash
 sqlite3 data/seen.db 'SELECT reject_reason, COUNT(*) FROM seen WHERE status="rejected" GROUP BY 1 ORDER BY 2 DESC;'
@@ -135,19 +327,22 @@ Settings → Secrets and variables → Actions → **New repository secret**:
 |---|---|
 | `TG_BOT_TOKEN` | Bot token from `@BotFather` (`123…:AAE…`) |
 | `TG_CHAT_ID` | Chat identifier: `@channel_name`, personal id (`582409029`), or supergroup id (`-100…`, `-541…`) |
+| `TURSO_URL` | `libsql://<db>-<user>.turso.io` — from `turso db show <db> --url` |
+| `TURSO_AUTH_TOKEN` | From `turso db tokens create <db> --expiration none` |
 
 The workflow renders `config.yml` from `config.example.yml` on every run by
-substituting those two secrets — nothing else is needed.
+substituting `TG_*` into it, and passes `TURSO_*` through as env vars so the
+scanner writes to cloud libSQL instead of a local file.
 
 ### What the workflow does
 
 1. Checkout, set up Python 3.11, install Poetry, cache the virtualenv
 2. `poetry install --no-root`
-3. Render `config.yml` from `config.example.yml` + secrets (via inline Python,
-   safe against special characters in the token)
-4. `poetry run python main.py`
-5. Force-add `data/seen.db` (bypasses gitignore), commit, push — so the next
-   run inherits the dedup state
+3. Render `config.yml` from `config.example.yml` + `TG_*` secrets (via
+   inline Python — safe against special characters in the token)
+4. `poetry run python main.py` with `TURSO_URL` + `TURSO_AUTH_TOKEN` in env,
+   so writes go to the cloud DB. Cross-run continuity is provided by Turso —
+   no `git commit` of `seen.db` needed.
 
 ### Costs
 
