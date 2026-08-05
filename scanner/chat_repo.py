@@ -173,6 +173,30 @@ class ChatConfigRepo:
         row = cur.fetchone()
         return bool(row and int(row[0]) > 0)
 
+    # ── /scan dispatch rate limiting ──────────────────────────────────
+
+    def recent_scan_dispatch_count(self, within_seconds: int) -> int:
+        """How many ``/scan`` dispatches happened in the last N seconds, globally.
+
+        Global (not per-chat) on purpose: the GitHub Actions queue is a shared
+        resource, so ten chats each dispatching once is just as disruptive as
+        one chat dispatching ten times.
+        """
+        cur = self.store.conn.execute(
+            "SELECT COUNT(*) FROM scan_dispatches "
+            "WHERE dispatched_at >= datetime('now', ?)",
+            (f"-{int(within_seconds)} seconds",),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+    def record_scan_dispatch(self, chat_id, user_id=None) -> None:
+        self.store.conn.execute(
+            "INSERT INTO scan_dispatches (chat_id, user_id) VALUES (?, ?)",
+            (str(chat_id), None if user_id is None else str(user_id)),
+        )
+        self.store.conn.commit()
+
     # ── stats ─────────────────────────────────────────────────────────
 
     def stats_last_days(self, chat_id, days: int) -> Dict[str, int]:

@@ -234,8 +234,31 @@ Set these on the Vercel project that serves `api/telegram_webhook.py`:
 | `TURSO_AUTH_TOKEN` | yes | same Turso token |
 | `DASHBOARD_URL` | optional | public Streamlit URL |
 | `TG_CHAT_ID` | optional | fallback bootstrap chat |
-| `TG_WORKFLOW_ALLOWED_CHAT_IDS` | yes for `/scan` | comma-separated chat IDs allowed to dispatch scans |
+| `TG_WORKFLOW_ALLOWED_CHAT_IDS` | optional | tighten `/scan` to these chat IDs only. Unset = every registered chat may dispatch (see below) |
 | `TG_WORKFLOW_ALLOWED_USER_IDS` | optional | comma-separated Telegram user IDs additionally allowed to dispatch `/scan` |
+| `TG_SCAN_COOLDOWN_SECONDS` | optional | `/scan` throttle window; overrides `notifications.scan_cooldown_seconds` |
+| `TG_SCAN_MAX_PER_WINDOW` | optional | max forced scans per window; `0` disables throttling |
+
+### Who may run `/scan`
+
+Chats **self-register** when the bot is added, so there is no allowlist to
+maintain by hand. Authorization has three layers:
+
+1. **Chat gate** — by default any chat present and `enabled` in
+   `chat_configs` may dispatch. Setting `TG_WORKFLOW_ALLOWED_CHAT_IDS`
+   switches to restricted mode: only the listed IDs may dispatch, even if
+   other chats are registered. Use restricted mode if the bot lives in
+   groups you don't fully control.
+2. **Admin gate** — in groups/supergroups the requester must be an
+   administrator or creator. If Telegram can't confirm that (network error,
+   rate limit, bot removed), the check **fails closed** and denies.
+3. **Throttle** — at most `scan_max_per_window` dispatches per
+   `scan_cooldown_seconds`, counted **globally** because the GitHub Actions
+   queue is one shared resource. Defaults: 3 per 10 minutes. The scheduled
+   15-minute scan is unaffected; the throttle only limits *forced* runs.
+
+Every dispatch is logged to the `scan_dispatches` table (chat, user,
+timestamp) for auditing.
 | `GITHUB_REPOSITORY_OWNER` | yes for `/scan` | repo owner |
 | `GITHUB_REPOSITORY_NAME` | yes for `/scan` | repo name |
 | `GITHUB_SCAN_WORKFLOW_FILE` | yes for `/scan` | usually `scan.yml` |

@@ -110,6 +110,18 @@ _SCHEMA_STMTS = [
         processed_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
     """,
+    # Audit + rate-limit log for /scan workflow dispatches. Any registered
+    # chat may dispatch (see CommandRouter._scan_permission_error), so a
+    # global cooldown keeps the shared GitHub Actions queue from being flooded.
+    """
+    CREATE TABLE IF NOT EXISTS scan_dispatches (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id       TEXT NOT NULL,
+        user_id       TEXT,
+        dispatched_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS scan_dispatches_time_idx ON scan_dispatches(dispatched_at)",
 ]
 
 

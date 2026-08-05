@@ -148,3 +148,78 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("bzp", self.cfg["sources"])
         keyboard = json.dumps(default_reply_keyboard(), ensure_ascii=False).lower()
         self.assertNotIn("bzp", keyboard)
+
+
+class ScanAuthorizationTests(unittest.TestCase):
+    """/scan chat gate: auto-allowlist by registration, env var as tightening."""
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.store = SeenStore(str(Path(self.tempdir.name) / "seen.db"))
+        self.repo = ChatConfigRepo(self.store)
+        self.cfg = load_yaml_config("config.example.yml")
+        self.cfg["telegram"]["bot_token"] = "TOKEN"
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.tempdir.cleanup()
+
+    def _ctx(self, chat_id: str, chat_type: str = "private"):
+        from scanner.commands import CommandContext
+
+        return CommandContext(
+            chat_id=chat_id, chat_title="t", chat_type=chat_type,
+            user_id=1, user_name="u", message_id=1,
+        )
+
+    def _router(self, env: dict | None = None) -> CommandRouter:
+        return CommandRouter("TOKEN", self.repo, deepcopy(self.cfg), env=env or {})
+
+    def test_registered_chat_is_allowed_without_any_env_allowlist(self) -> None:
+        self.repo.register_chat("-100777", "auto-registered")
+        self.assertIsNone(self._router()._scan_permission_error(self._ctx("-100777")))
+
+    def test_unregistered_chat_is_denied(self) -> None:
+        error = self._router()._scan_permission_error(self._ctx("-100999"))
+        self.assertIsNotNone(error)
+        self.assertIn("not registered", error)
+
+    def test_disabled_chat_is_denied(self) -> None:
+        self.repo.register_chat("-100777", "auto-registered")
+        self.repo.set_enabled("-100777", False)
+        self.assertIsNotNone(self._router()._scan_permission_error(self._ctx("-100777")))
+
+    def test_env_allowlist_overrides_registration(self) -> None:
+        self.repo.register_chat("-100777", "auto-registered")
+        router = self._router({"TG_WORKFLOW_ALLOWED_CHAT_IDS": "-100555"})
+        # Registered but not listed -> denied.
+        self.assertIsNotNone(router._scan_permission_error(self._ctx("-100777")))
+        # Listed but never registered -> allowed (explicit beats auto).
+        self.assertIsNone(router._scan_permission_error(self._ctx("-100555")))
+
+    def test_group_admin_check_fails_closed_on_api_error(self) -> None:
+        self.repo.register_chat("-100777", "auto-registered")
+        router = self._router()
+        with patch(
+            "scanner.commands.get_chat_member_status",
+            side_effect=RuntimeError("telegram down"),
+        ):
+            error = router._scan_permission_error(self._ctx("-100777", chat_type="supergroup"))
+        self.assertIsNotNone(error)
+        self.assertIn("Could not verify", error)
+
+    def test_cooldown_blocks_after_limit_reached(self) -> None:
+        router = self._router()
+        limit = int(self.cfg["notifications"]["scan_max_per_window"])
+        for _ in range(limit):
+            self.assertIsNone(router._scan_cooldown_error())
+            self.repo.record_scan_dispatch("-100777", 1)
+        error = router._scan_cooldown_error()
+        self.assertIsNotNone(error)
+        self.assertIn("throttled", error.lower())
+
+    def test_cooldown_disabled_when_limit_is_zero(self) -> None:
+        router = self._router({"TG_SCAN_MAX_PER_WINDOW": "0"})
+        for _ in range(10):
+            self.repo.record_scan_dispatch("-100777", 1)
+        self.assertIsNone(router._scan_cooldown_error())

@@ -263,6 +263,10 @@ class CommandRouter:
         if denied:
             return [BotReply(denied, parse_mode=None)]
 
+        throttled = self._scan_cooldown_error()
+        if throttled:
+            return [BotReply(throttled, parse_mode=None)]
+
         dispatcher = GitHubWorkflowDispatcher.from_env(env=self.env)
         if dispatcher is None:
             return [
@@ -281,6 +285,7 @@ class CommandRouter:
             trigger_user_name=ctx.user_name,
             command="scan",
         )
+        self.repo.record_scan_dispatch(ctx.chat_id, ctx.user_id)
         lines = [
             "Scan queued.",
             "The GitHub Actions run will send a Telegram summary here when it finishes.",
@@ -410,16 +415,44 @@ class CommandRouter:
         return dashboard_url_from_cfg(self.baseline_cfg)
 
     def _scan_permission_error(self, ctx: CommandContext) -> Optional[str]:
-        allowed_chats = self._parse_csv_ids(
-            self.env.get("TG_WORKFLOW_ALLOWED_CHAT_IDS")
-            or ((self.baseline_cfg.get("telegram") or {}).get("chat_id") or "")
+        """Authorize a ``/scan`` dispatch. Returns an error string, or None to allow.
+
+        Chat gate — two modes:
+
+        * **Auto (default)**: any chat registered and enabled in
+          ``chat_configs`` may dispatch. Chats self-register when the bot is
+          added, so there is nothing to configure by hand. Combined with the
+          admin check below, this means "an admin of a chat the bot serves".
+        * **Restricted**: set ``TG_WORKFLOW_ALLOWED_CHAT_IDS`` to a
+          comma-separated list and *only* those chats may dispatch, even if
+          other chats are registered. Use this if the bot lives in groups you
+          don't fully control.
+
+        Additional gates (both modes): optional ``TG_WORKFLOW_ALLOWED_USER_IDS``
+        allowlist, and — in groups/supergroups — the requester must be a chat
+        administrator or creator.
+        """
+        explicit_allowlist = self._parse_csv_ids(
+            self.env.get("TG_WORKFLOW_ALLOWED_CHAT_IDS", "")
         )
-        if not allowed_chats or ctx.chat_id not in allowed_chats:
-            return (
-                "This chat is not allowed to dispatch GitHub scanner workflows.\n\n"
-                "Set TG_WORKFLOW_ALLOWED_CHAT_IDS (or TG_CHAT_ID fallback) to the chat IDs "
-                "that may use /scan."
-            )
+        if explicit_allowlist:
+            if ctx.chat_id not in explicit_allowlist:
+                return (
+                    "This chat is not in TG_WORKFLOW_ALLOWED_CHAT_IDS, so /scan is "
+                    "disabled here.\n\n"
+                    "Remove that variable to allow every registered chat, or add "
+                    f"<code>{ctx.chat_id}</code> to it."
+                )
+        else:
+            # Auto mode — registered + enabled is the allowlist.
+            row = self.repo.get(ctx.chat_id)
+            if row is None or not row.enabled:
+                return (
+                    "This chat is not registered as a scan target yet, so /scan is "
+                    "unavailable.\n\n"
+                    "Re-add the bot to this chat (it self-registers), or enable the "
+                    "chat in the dashboard."
+                )
 
         allowed_users = self._parse_csv_ids(self.env.get("TG_WORKFLOW_ALLOWED_USER_IDS", ""))
         if allowed_users and (ctx.user_id is None or str(ctx.user_id) not in allowed_users):
@@ -446,6 +479,39 @@ class CommandRouter:
             if status not in {"administrator", "creator"}:
                 return "Only chat administrators may run /scan."
         return None
+
+    def _scan_cooldown_error(self) -> Optional[str]:
+        """Global throttle for ``/scan``. Returns an error string, or None to allow.
+
+        Needed because chat authorization is automatic: every chat the bot is
+        added to can dispatch, so without a cap a single group could queue
+        dozens of GitHub Actions runs. Window/limit come from
+        ``notifications.scan_cooldown_seconds`` / ``scan_max_per_window``
+        (env: ``TG_SCAN_COOLDOWN_SECONDS`` / ``TG_SCAN_MAX_PER_WINDOW``).
+
+        Set the limit to 0 to disable throttling entirely.
+        """
+        notif = self.baseline_cfg.get("notifications") or {}
+        window = int(
+            self.env.get("TG_SCAN_COOLDOWN_SECONDS")
+            or notif.get("scan_cooldown_seconds", 600)
+        )
+        limit = int(
+            self.env.get("TG_SCAN_MAX_PER_WINDOW")
+            or notif.get("scan_max_per_window", 3)
+        )
+        if limit <= 0 or window <= 0:
+            return None
+        recent = self.repo.recent_scan_dispatch_count(window)
+        if recent < limit:
+            return None
+        minutes = max(1, window // 60)
+        return (
+            f"Scan throttled: {recent} scans were already dispatched in the last "
+            f"{minutes} min (limit {limit}).\n\n"
+            "The scheduled scan keeps running every 15 min regardless — /scan is "
+            "only for forcing an early run."
+        )
 
     def _parse_csv_ids(self, raw: str) -> set[str]:
         return {part.strip() for part in (raw or "").split(",") if part.strip()}
