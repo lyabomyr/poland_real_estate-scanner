@@ -90,13 +90,19 @@ class EveryCommandAnswersTests(unittest.TestCase):
     def test_grouping_explains_itself_when_given_no_argument(self) -> None:
         text = self._run("/grouping")[0].text
         self.assertIn("never fewer flats", text)
-        self.assertIn("/grouping 99", text)       # how to switch it off
+        self.assertIn("/grouping 0", text)        # how to switch it off
         self.assertIn(str(self.cfg["notifications"]["min_group_size"]), text)
 
-    def test_grouping_refuses_a_threshold_below_one(self) -> None:
-        for bad in ("/grouping 0", "/grouping -3"):
-            with self.subTest(command=bad):
-                self.assertIn("starts at 1", self._run(bad)[0].text)
+    def test_grouping_zero_switches_it_off(self) -> None:
+        """0 is a real off switch. A big threshold is not: Kraków produces a
+        104-listing location bucket, so 99 still grouped."""
+        override = ChatOverride()
+        replies = self.router._handlers["grouping"](["0"], override, self.ctx)
+        self.assertEqual(0, override.min_group_size)
+        self.assertIn("Grouping off", replies[0].text)
+
+    def test_grouping_refuses_a_negative_threshold(self) -> None:
+        self.assertIn("/grouping 0", self._run("/grouping -3")[0].text)
 
     def test_grouping_with_a_number_sets_the_override(self) -> None:
         override = ChatOverride()

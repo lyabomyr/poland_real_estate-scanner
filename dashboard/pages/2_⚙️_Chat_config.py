@@ -141,12 +141,12 @@ with c4:
 
 new_group = st.number_input(
     "Group listings at the same address (min_group_size)",
-    min_value=1, max_value=99, step=1,
+    min_value=0, max_value=99, step=1,
     value=int(eff.min_group_size()),
     help=(
         "Fewer messages, never fewer flats. When this many new listings from "
         "the same portal share an address, they arrive as one message with a "
-        "line per flat instead of separately. Set 99 to switch it off."
+        "line per flat instead of separately. Set 0 to switch it off."
     ),
 )
 _origin(override.min_group_size is not None, str(base_group))

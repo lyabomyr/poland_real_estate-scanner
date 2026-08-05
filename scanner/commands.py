@@ -188,7 +188,7 @@ class CommandRouter:
             "/min_area N — override min area (m²)",
             "/max_area N — set an upper area cap",
             "/min_year Y — earliest build year accepted",
-            "/grouping [N] — explain grouping, or set the threshold",
+            "/grouping [N] — explain grouping, set the threshold, 0 = off",
             "/source NAME on|off — enable/disable a data source",
             "/source NAME url URL — custom URL for a source (this chat only)",
             "/kw + NAME [WEIGHT] — add positive scoring keyword",
@@ -219,15 +219,17 @@ class CommandRouter:
         answers that head-on with a worked example.
         """
         if args:
-            # 0 or a negative threshold would make every single listing a
-            # "group of one" and the roll-up meaningless, so refuse it here
-            # rather than let the generic int setter store nonsense.
-            if args[0].lstrip("-").isdigit() and int(args[0]) < 1:
+            if args[0].lstrip("-").isdigit() and int(args[0]) < 0:
                 return [BotReply(
-                    "Grouping starts at 1. Use /grouping 99 to switch it off.",
+                    "Use /grouping 0 to switch grouping off.", parse_mode=None,
+                )]
+            replies = self._set_int(args, override, "min_group_size")
+            if override.min_group_size == 0:
+                return [BotReply(
+                    "✓ Grouping off — every flat now gets its own message.",
                     parse_mode=None,
                 )]
-            return self._set_int(args, override, "min_group_size")
+            return replies
 
         current = EffectiveConfig(
             baseline=self.baseline_cfg, override=override
@@ -256,7 +258,7 @@ class CommandRouter:
             "",
             "<b>Change it</b>",
             "/grouping 2 — roll up even a pair",
-            "/grouping 99 — off: every flat gets its own message",
+            "/grouping 0 — off: every flat gets its own message",
             "/reset min_group_size — back to the default",
         ]))]
 

@@ -8,7 +8,7 @@ SELECT_PY := ./scripts/select_python.sh
 
 # There is no reset-db target: the dedup store is the shared Turso database,
 # never a local file, so wiping it is not a local operation.
-.PHONY: help install run dry clean test lint chats prune greet \
+.PHONY: help install run dry clean test lint chats prune greet integration \
         pin-dashboard dashboard check-dashboard-deps boot-check
 
 help:
@@ -59,3 +59,6 @@ boot-check:  ## boot the dashboard in a clean venv and hit every page
 clean:  ## remove caches and the virtualenv
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
 	rm -rf $(VENV)
+
+integration:  ## live check: portals, database, bot commands (~3 min)
+	$(PY) scripts/integration_check.py

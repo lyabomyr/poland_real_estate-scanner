@@ -69,11 +69,18 @@ def group_listings(
 
     Grouping is per source — we never mix Otodom+OLX+Morizon under one roll-up.
 
+    ``min_group_size = 0`` switches grouping off entirely. A large threshold
+    is not the same thing: Kraków really does produce a 104-listing location
+    bucket, so "99" still grouped. An off switch has to be an off switch.
+
     A location key with more than ``max_per_message`` listings is split across
     several groups rather than crammed into one oversized message. Every
     listing always ends up in exactly one yielded item: grouping changes how
     listings are *packaged*, never whether they are sent.
     """
+    if min_group_size <= 0:
+        yield from listings
+        return
     by_source: dict = {}
     for l in listings:
         by_source.setdefault(l.source, []).append(l)

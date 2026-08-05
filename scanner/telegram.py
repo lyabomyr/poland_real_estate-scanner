@@ -27,6 +27,17 @@ from .models import Listing
 
 log = logging.getLogger(__name__)
 
+#: Longest 429 backoff worth sitting through. Beyond this, giving up is
+#: strictly better: the listing stays in the delivery backlog and goes out on
+#: the next run, whereas sleeping burns the run's remaining time budget and
+#: delivers nothing at all.
+MAX_RATE_LIMIT_WAIT_SECONDS = 30
+
+#: Attempts per message before it is left for the next run. Telegram can 429
+#: repeatedly while a backlog drains, and one message must never be able to
+#: monopolise the run.
+RATE_LIMIT_ATTEMPTS = 3
+
 
 def default_reply_keyboard() -> dict:
     """Persistent reply keyboard shown below the chat's input field.
@@ -352,9 +363,9 @@ class TelegramNotifier:
         # A group has many URLs; link previews would visually explode the message.
         return self._post(text=format_group_html(g), preview=False, tag=f"group:{g.label}")
 
-    def _post(self, text: str, preview: bool, tag: str) -> bool:
+    def _post(self, text: str, preview: bool, tag: str, attempt: int = 1) -> bool:
         if not self.is_configured():
-            log.debug("telegram not configured; skipping send for %s", tag)
+            log.warning("telegram not configured; %s was not sent", tag)
             return False
         try:
             r = requests.post(
@@ -368,14 +379,34 @@ class TelegramNotifier:
                 timeout=30,
             )
             if r.status_code == 429:
-                # Telegram returns the exact backoff — sleep, then retry.
-                # +1 s gives us a safety margin against clock drift.
-                retry = int(r.json().get("parameters", {}).get("retry_after", 5))
-                log.warning("telegram rate-limited; sleeping %ds", retry + 1)
-                time.sleep(retry + 1)
-                return self._post(text, preview, tag)
+                return self._wait_out_rate_limit(r, text, preview, tag, attempt)
             r.raise_for_status()
             return True
         except Exception as e:
             log.error("telegram send failed for %s: %s", tag, e)
             return False
+
+    def _wait_out_rate_limit(self, response, text, preview, tag, attempt: int) -> bool:
+        """Honour a 429, but only when waiting is actually cheaper than giving up.
+
+        Telegram supplies the backoff, so the wait itself is never guessed.
+        What needs a decision is when to stop waiting. Draining a backlog of
+        several hundred messages means hitting the ~20-per-minute group limit
+        constantly, and a run that spends its budget asleep delivers less than
+        one that gives up early: an undelivered listing is not lost, it simply
+        stays in the backlog and goes out on the next run.
+
+        So: short waits are worth taking, long ones are not, and a message is
+        never retried indefinitely. Bounded iteration rather than the
+        recursion this used to do, which could nest a frame per retry.
+        """
+        retry = int((response.json().get("parameters") or {}).get("retry_after", 5))
+        if retry > MAX_RATE_LIMIT_WAIT_SECONDS or attempt >= RATE_LIMIT_ATTEMPTS:
+            log.warning(
+                "telegram rate-limited for %ss on %s — leaving it in the "
+                "backlog for the next run", retry, tag,
+            )
+            return False
+        log.info("telegram rate-limited; sleeping %ds then retrying %s", retry + 1, tag)
+        time.sleep(retry + 1)   # +1s margin against clock drift
+        return self._post(text, preview, tag, attempt=attempt + 1)

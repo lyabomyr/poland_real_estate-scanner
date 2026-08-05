@@ -33,19 +33,21 @@ filters:
     # poor thermal performance. "wielka płyta" is the Polish name for the
     # 1960s-80s prefab style ("велика панель" in UA).
     #
-    # These match the CONSTRUCTION TYPE, which is the thing we actually object
-    # to. Decade keywords ("z lat 60", "z lat 70") used to sit here and were
-    # moved to scoring.negative_keywords, because measured against the live
-    # Kraków market they were wrong in both directions:
-    #   - they miss real prefab: "blok z wielkiej płyty z 1987 roku"
-    #   - they reject good brick: "kameralnego, dwupiętrowego budynku
-    #     z cegły z lat 60." — a low-rise brick building, not a panel block
-    # A decade is a proxy; the material is the fact. Penalise the proxy in
-    # scoring, reject only on the fact.
     - "wielka płyta"
     - "wielkiej płyty"
     - "wielkopłyt"
     - "hruszcz"           # хрущовка / Khrushchyovka (rare in PL but harmless)
+    # Decade keywords. Measured against the live Kraków market they are a
+    # blunt instrument in both directions:
+    #   - they miss real prefab: "blok z wielkiej płyty z 1987 roku"
+    #   - they reject good brick: "kameralnego, dwupiętrowego budynku
+    #     z cegły z lat 60." — a low-rise brick building, not a panel block
+    # Kept because you asked for them: an old building is an old building,
+    # and you would rather not see it at all. Delete either line to get those
+    # listings back — the next run re-walks the full back-catalogue and
+    # un-rejects everything they had blocked, so nothing stays buried.
+    - "z lat 60"
+    - "z lat 70"
 
 telegram:
   bot_token: "REPLACE_WITH_BOT_TOKEN"
@@ -90,10 +92,13 @@ notifications:
   #   4096 characters, and a rejected message is a listing you never see.
   #
   # TUNING
-  #   3  (default) — collapse from three identical-looking ads upwards
-  #   2  — aggressive: even a pair gets rolled up
-  #   99 — effectively off: every flat gets its own message. Use this if you
-  #        would rather scroll than risk skimming past a line in a roll-up.
+  #   3 (default) — collapse from three identical-looking ads upwards
+  #   2 — aggressive: even a pair gets rolled up
+  #   0 — off: every flat gets its own message. Use this if you would rather
+  #       scroll than risk skimming past a line in a roll-up.
+  #
+  #   Use 0, not a large number. A big threshold is not an off switch: Kraków
+  #   really does produce a 104-listing location bucket, so 99 still grouped.
   #
   #   Per chat: /reset min_group_size, or the dashboard's Chat config page.
   #
@@ -199,13 +204,10 @@ scoring:
     - "ostatnie piętr"                          # top floor — thermal issues under flat roof
     - "bez windy"                               # no elevator (bad for floor 3+)
     - "wysoki parter"                           # mezzanine — poor natural light
-    # Old-building decades. A penalty, NOT a hard reject: plenty of 1960s
-    # Kraków stock is low-rise brick and perfectly good, while actual prefab
-    # blocks run into the late 80s. filters.reject_keywords rejects on the
-    # construction type instead; these just push a listing down the ranking
-    # so you still see it and decide for yourself.
-    - { name: "z lat 60",        weight: 4 }
-    - { name: "z lat 70",        weight: 4 }
+    # NOTE: "z lat 60" / "z lat 70" deliberately do NOT appear here. They are
+    # hard rejects in filters.reject_keywords, so such listings never reach
+    # scoring — a penalty here would be dead config. Move them here (and out
+    # of reject_keywords) if you would rather rank them low than not see them.
 
 storage:
   # State always lives in Turso — set TURSO_URL and TURSO_AUTH_TOKEN in the

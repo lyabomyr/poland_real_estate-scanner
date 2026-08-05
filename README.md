@@ -141,8 +141,11 @@ groups made **220 of 1004 matched listings permanently unreachable**.
 `tests/test_aggregation_loses_nothing.py` pins both properties — every input
 listing is emitted exactly once, and no rendered message can exceed the limit.
 
-Turn it off per chat with `/grouping 99`, or from the dashboard's Chat config
+Turn it off per chat with `/grouping 0`, or from the dashboard's Chat config
 page. `/grouping` with no argument explains it inside Telegram.
+
+`0` is a real switch, not a big number: Kraków produces a 104-listing location
+bucket, so a threshold of 99 still grouped.
 
 The address is whatever the portal reports. Morizon usually gives street +
 district; Otodom and OLX give only city + district, so their listings rarely

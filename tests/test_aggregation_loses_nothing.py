@@ -80,6 +80,19 @@ class NothingIsLostTests(unittest.TestCase):
                 f"message of {len(body)} chars would be rejected by Telegram",
             )
 
+    def test_zero_is_a_real_off_switch(self) -> None:
+        """A large threshold is not "off": Kraków yields a 104-listing bucket,
+        so min_group_size=99 still grouped. Only 0 switches it off."""
+        listings = [_listing(i, "Agatowa, Os. Złocień, Kraków, małopolskie")
+                    for i in range(104)]
+        items = list(group_listings(listings, min_group_size=0))
+        self.assertEqual(104, len(items))
+        self.assertTrue(all(isinstance(i, Listing) for i in items))
+
+        still_grouped = list(group_listings(listings, min_group_size=99))
+        self.assertTrue(any(isinstance(i, ListingGroup) for i in still_grouped),
+                        "a bucket bigger than the threshold still groups")
+
     def test_a_group_below_the_threshold_stays_individual(self) -> None:
         listings = [_listing(i, "Agatowa, Os. Złocień, Kraków, małopolskie") for i in range(2)]
         items = list(group_listings(listings, min_group_size=3))
