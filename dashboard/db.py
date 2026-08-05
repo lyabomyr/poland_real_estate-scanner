@@ -42,12 +42,12 @@ _WANTED_SECRETS = ("TURSO_URL", "TURSO_AUTH_TOKEN")
 def load_baseline_config() -> dict:
     """The YAML baseline every chat inherits from.
 
-    Always ``config.example.yml`` — the one file the scanner runs with, here
-    and on GitHub Actions. This used to prefer a local ``config.yml`` when
-    present, which meant a developer's stale copy was shown as "the
-    defaults" while the scanner was applying entirely different ones.
+    Always the repo's tracked ``config.yml`` — the one file the scanner runs
+    with, here and on GitHub Actions. There used to be a second, gitignored
+    copy that this preferred when present, which meant a developer's stale
+    file was shown as "the defaults" while the scanner applied different ones.
     """
-    path = _ROOT / "config.example.yml"
+    path = _ROOT / "config.yml"
     return load_runtime_config(path) if path.exists() else {}
 
 

@@ -18,7 +18,7 @@ class BootstrapTests(unittest.TestCase):
         self.store = SeenStore(local_path=str(self.db_path))
         self.repo = ChatConfigRepo(self.store)
         self.log = logging.getLogger("test-bootstrap")
-        self.cfg = load_yaml_config("config.example.yml")
+        self.cfg = load_yaml_config("config.yml")
 
     def tearDown(self) -> None:
         self.store.close()

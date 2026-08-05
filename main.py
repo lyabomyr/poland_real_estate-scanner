@@ -42,14 +42,14 @@ from scanner.telegram import (
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Kraków real-estate scanner")
-    # One config file for every environment. It used to default to a local,
-    # gitignored config.yml while GitHub Actions passed config.example.yml,
-    # and the two silently drifted apart: local runs kept hard-rejecting
-    # "z lat 60", pinned every source URL (so changing `city` did nothing)
-    # and enabled a source that no longer exists. Secrets come from the
-    # environment, so a private copy buys nothing and costs correctness.
-    p.add_argument("--config", default="config.example.yml",
-                   help="YAML baseline config (default: config.example.yml)")
+    # One tracked config file for every environment. There used to be two —
+    # a gitignored local config.yml and a deployed config.example.yml — and
+    # they silently drifted: local runs hard-rejected "z lat 60", pinned
+    # every source URL (so changing `city` did nothing) and enabled a source
+    # that no longer exists. Secrets come from the environment, so a private
+    # copy buys nothing and costs correctness.
+    p.add_argument("--config", default="config.yml",
+                   help="YAML baseline config (default: config.yml)")
     p.add_argument("--dry-run", action="store_true",
                    help="don't send Telegram messages, don't persist state")
     p.add_argument("--print-chats", action="store_true",
@@ -136,7 +136,7 @@ def main() -> int:
 
         chats = [c for c in repo.list_enabled() if not c.override.paused]
         if not chats:
-            log.info("no active chats — set telegram.chat_id in config.example.yml or add the bot to a group")
+            log.info("no active chats — set telegram.chat_id in config.yml or add the bot to a group")
             return 0
 
         contexts = [

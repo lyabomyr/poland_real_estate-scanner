@@ -1,6 +1,6 @@
 """Runtime config loading + environment overrides.
 
-``config.example.yml`` is the single baseline for every environment —
+``config.yml`` is the single baseline for every environment —
 local, GitHub Actions and the dashboard all load the same file. Secrets and
 public URLs are injected from environment variables on top, so credentials
 never have to be written into a config file.
@@ -22,7 +22,7 @@ def load_yaml_config(path: str | Path) -> dict:
 
 
 def load_runtime_config(
-    path: str | Path = "config.example.yml",
+    path: str | Path = "config.yml",
     *,
     fallback_path: str | Path | None = None,
     env: Optional[Mapping[str, str]] = None,

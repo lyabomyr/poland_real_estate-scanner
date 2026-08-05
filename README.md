@@ -87,7 +87,7 @@ URL precedence, most specific first:
 
 ## Defaults and filters
 
-Defaults live in [`config.example.yml`](config.example.yml):
+Defaults live in [`config.yml`](config.yml):
 
 ```yaml
 search:
@@ -244,16 +244,17 @@ make chats
 make greet
 ```
 
-There is deliberately **one** config file. `config.example.yml` is what runs
+There is deliberately **one** config file. `config.yml` is what runs
 everywhere — locally, on GitHub Actions and behind the dashboard's "default"
 captions. Secrets never go in it; they come from the environment
 (`.env` locally, repo secrets in Actions).
 
-An earlier layout copied it to a gitignored `config.yml` for local use, and
-the two drifted: the local copy kept hard-rejecting `z lat 60`, pinned every
-source URL so changing `city` did nothing, and enabled a source that had been
-removed. If you still have a `config.yml`, it is no longer read — delete it,
-especially if you ever put a bot token in it.
+An earlier layout had two files — this one as `config.example.yml`, plus a
+gitignored `config.yml` for local use — and they drifted: the local copy kept
+hard-rejecting `z lat 60`, pinned every source URL so changing `city` did
+nothing, and enabled a source that had been removed. Don't recreate that
+split. Per-chat differences belong in `chat_configs`, edited from the
+dashboard or the bot, not in a second YAML file.
 
 Note: `make chats` and `make greet` read `getUpdates`, the same channel the
 scanner drains. Running them locally consumes updates the next scheduled scan

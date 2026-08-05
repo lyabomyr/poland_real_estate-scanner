@@ -21,7 +21,7 @@ class CommandTests(unittest.TestCase):
         self.db_path = Path(self.tempdir.name) / "seen.db"
         self.store = SeenStore(local_path=str(self.db_path))
         self.repo = ChatConfigRepo(self.store)
-        self.cfg = load_yaml_config("config.example.yml")
+        self.cfg = load_yaml_config("config.yml")
         self.cfg["notifications"]["dashboard_url"] = "https://scanner.streamlit.app"
         self.cfg["telegram"]["bot_token"] = "SECRET_TOKEN"
         self.cfg["telegram"]["chat_id"] = "-999"

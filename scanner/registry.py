@@ -6,7 +6,7 @@ URLs in the first place. Importing it from ``main`` would make
 ``scanner.* -> main -> scanner.*`` circular, so it lives here.
 
 Adding a source: import it, add one line to :data:`SOURCE_REGISTRY`, and give
-it a block under ``sources:`` in ``config.example.yml``.
+it a block under ``sources:`` in ``config.yml``.
 """
 
 from __future__ import annotations

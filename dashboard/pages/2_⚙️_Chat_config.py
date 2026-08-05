@@ -1,7 +1,7 @@
 """Per-chat config editor.
 
 Every field shows its **effective** value — the chat's override if it has
-one, otherwise the baseline default from `config.example.yml`. A caption under each
+one, otherwise the baseline default from `config.yml`. A caption under each
 field says which of the two you're looking at, so an untouched chat displays
 the real defaults instead of blanks.
 
@@ -35,7 +35,7 @@ if not render_connection_status():
 
 st.markdown(
     "Values below are what the scanner **will actually use** for the selected "
-    "chat. Anything not overridden here comes from `config.example.yml` — the shared "
+    "chat. Anything not overridden here comes from `config.yml` — the shared "
     "baseline every chat inherits. Changes apply on the next scan (≤ 15 min)."
 )
 
@@ -83,7 +83,7 @@ def _origin(is_overridden: bool, default_text: str) -> None:
     if is_overridden:
         st.caption(f"🔸 overridden for this chat · default: {default_text}")
     else:
-        st.caption(f"⚪️ default from config.example.yml ({default_text})")
+        st.caption(f"⚪️ default from config.yml ({default_text})")
 
 
 # ── Search thresholds ─────────────────────────────────────────────────
@@ -294,7 +294,7 @@ if col_save.button("💾 Save", type="primary"):
 if col_reset.button("↩️ Reset to defaults"):
     # Keep only the pause flag — everything else falls back to the YAML baseline.
     upsert_chat_override(picked, row.title, ChatOverride(paused=paused))
-    st.success("Reset — this chat now uses the config.example.yml defaults.")
+    st.success("Reset — this chat now uses the config.yml defaults.")
     st.rerun()
 
 if col_off.button("🗑 Unregister chat"):
