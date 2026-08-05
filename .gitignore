@@ -10,6 +10,11 @@ data/*
 !data/.gitkeep
 config.yml
 .streamlit/secrets.toml
+# Real env files hold bot/Turso/GitHub tokens — never commit them.
+# Only .env.vercel.example (placeholders only) is tracked.
+.env
+.env.*
+!.env.vercel.example
 # Scanner writes run stats here (--stats-json); the workflow reads it in the
 # next step and it never needs to be committed.
 .tmp/
