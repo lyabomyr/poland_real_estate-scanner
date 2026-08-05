@@ -30,6 +30,7 @@ Robustness rules:
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import asdict
 from typing import Callable, Dict, List, Optional
@@ -38,6 +39,7 @@ import requests
 
 from .chat_config import ChatOverride
 from .chat_repo import ChatConfigRepo
+from .telegram import default_reply_keyboard
 
 log = logging.getLogger(__name__)
 
@@ -315,6 +317,10 @@ class CommandRouter:
                     "text": text,
                     "parse_mode": "HTML",
                     "disable_web_page_preview": "true",
+                    # Attach the persistent menu on every command reply so
+                    # a user who cleared it (or first-time messengers who
+                    # never got the greeting) still gets the buttons.
+                    "reply_markup": json.dumps(default_reply_keyboard()),
                 },
                 timeout=15,
             )

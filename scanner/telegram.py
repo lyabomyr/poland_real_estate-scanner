@@ -4,8 +4,17 @@ The Bot API's per-group limit is ~20 messages/minute — a fresh scan easily
 exceeds that, so :meth:`_post` handles ``429 Too Many Requests`` by sleeping
 for ``retry_after`` seconds and retrying. The channel *never* misses a
 message; the run just takes a bit longer.
+
+Interactive UX
+--------------
+Command replies + the initial greeting attach a **persistent reply
+keyboard** (buttons below the input field) so the user can trigger common
+commands with a tap instead of typing. Listing notifications do NOT set
+the keyboard — once shown, Telegram keeps it in the chat regardless of
+subsequent message sources.
 """
 
+import json
 import logging
 import time
 from typing import List, Optional
@@ -17,6 +26,25 @@ from .format import format_group_html, format_html
 from .models import Listing
 
 log = logging.getLogger(__name__)
+
+
+def default_reply_keyboard() -> dict:
+    """Persistent reply keyboard shown below the chat's input field.
+
+    Two rows of buttons; each button's *text is the exact command it fires*
+    so the bot recognises them in the ``getUpdates`` message payload with
+    zero extra parsing. `is_persistent: true` (Bot API 6.4+) means the
+    keyboard stays open by default instead of hiding behind the tiny
+    "keyboard" icon.
+    """
+    return {
+        "keyboard": [
+            [{"text": "/status"}, {"text": "/help"},    {"text": "/stats"}],
+            [{"text": "/kw list"}, {"text": "/pause"}, {"text": "/resume"}],
+        ],
+        "resize_keyboard": True,
+        "is_persistent": True,
+    }
 
 
 def find_new_chat_memberships(bot_token: str, timeout: int = 10) -> List[dict]:
@@ -85,6 +113,9 @@ def send_greeting(bot_token: str, chat_id, title: Optional[str] = None) -> bool:
                 "text": text,
                 "parse_mode": "HTML",
                 "disable_web_page_preview": "true",
+                # Greeting is the first thing users see — good moment to
+                # surface the persistent button menu.
+                "reply_markup": json.dumps(default_reply_keyboard()),
             },
             timeout=15,
         )
