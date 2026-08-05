@@ -40,12 +40,18 @@ telegram:
   chat_id: ""                          # leave empty to auto-discover from getUpdates,
                                        # or set explicitly: "@your_channel", "582409029", "-100..."
   parse_mode: HTML
+  webhook_enabled: false               # true in serverless-webhook production; false for local polling
 
 notifications:
   # If N+ new listings from the same source share the same "street, district",
   # collapse them into one Telegram message instead of N separate ones.
   # Common when a developer lists every unit in a new building.
   min_group_size: 3
+
+  # Public URL of the Streamlit dashboard (deployed on Streamlit Community
+  # Cloud). Surfaced in /help, /status, /dashboard, and the greeting so
+  # users can jump to the UI. Leave empty / null if you don't run one.
+  dashboard_url: null
 
 scoring:
   # Rule-based deal-quality score (0-100) attached to every matched listing.
@@ -173,19 +179,6 @@ sources:
     enabled: true
     url: "https://licytacje.komornik.pl/wyszukiwarka-licytacji?mainCategory=REAL_ESTATE&subCategory=APARTMENTS&province=ma%C5%82opolskie&city=Krak%C3%B3w"
     pages: 3
-
-  # BZP is Poland's public procurement portal — mostly tenders, not sales.
-  # Genuine "apartment for sale" listings are rare here (few per month), but
-  # occasional bankruptcy / communal-property auctions do show up.
-  bzp:
-    enabled: true
-    days_back: 7                     # look this many days back
-    notice_type: ContractNotice      # main type; other values via /api/v1/Notice/stats
-    order_object: mieszkanie         # free-text search on the subject field
-    organization_city: null          # e.g. "Kraków" — filters by the procuring entity's city
-    organization_province: null      # e.g. "PL12" = małopolskie (narrows heavily)
-    cpv_code: null                   # e.g. 70123100 (sale of residential real estate)
-    page_size: 200
 
 logging:
   level: INFO

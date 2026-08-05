@@ -42,7 +42,7 @@ class Listing:
       dedup.
     """
 
-    source: str                        # "otodom" | "olx" | "morizon" | "komornik" | "bzp"
+    source: str                        # "otodom" | "olx" | "morizon" | "komornik"
     id: str                            # source-native id (stable across runs)
     url: str
     title: str

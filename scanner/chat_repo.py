@@ -85,6 +85,17 @@ class ChatConfigRepo:
         self.store.conn.execute("DELETE FROM chat_configs WHERE chat_id = ?", (str(chat_id),))
         self.store.conn.commit()
 
+    def register_chat(self, chat_id, title: Optional[str]) -> int:
+        """Ensure the chat exists as an enabled target; backfill on first create."""
+        row = self.get(chat_id)
+        if row is not None:
+            new_title = title or row.title
+            if new_title != row.title or not row.enabled:
+                self.upsert(chat_id, new_title, row.override, enabled=True)
+            return 0
+        self.upsert(chat_id, title, ChatOverride(), enabled=True)
+        return self.backfill_emissions_from_seen(chat_id)
+
     # ── emissions tracking (per-chat dedup) ───────────────────────────
 
     def has_emitted(self, chat_id, listing_key: str) -> bool:
@@ -151,6 +162,16 @@ class ChatConfigRepo:
             (int(update_id),),
         )
         self.store.conn.commit()
+
+    def claim_update(self, update_id: int) -> bool:
+        self.store.conn.execute(
+            "INSERT OR IGNORE INTO command_updates (update_id) VALUES (?)",
+            (int(update_id),),
+        )
+        cur = self.store.conn.execute("SELECT changes()")
+        self.store.conn.commit()
+        row = cur.fetchone()
+        return bool(row and int(row[0]) > 0)
 
     # ── stats ─────────────────────────────────────────────────────────
 

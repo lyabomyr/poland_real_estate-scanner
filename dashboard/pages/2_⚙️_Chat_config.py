@@ -1,8 +1,8 @@
-"""Per-chat config editor — the UI counterpart to the Telegram ``/set`` commands.
+"""Per-chat config editor — the UI counterpart to the Telegram commands.
 
 Everything you edit here writes to the ``chat_configs`` row for the
-selected chat. The scanner picks up changes on its next run (≤ 15 min via
-cron; instant if you trigger the workflow manually).
+selected chat. The scanner picks up changes on its next run, or immediately
+if you trigger ``/scan`` from Telegram.
 """
 
 from __future__ import annotations
@@ -81,7 +81,7 @@ new_min_year = c4.number_input(
 # ── Row 2: sources ────────────────────────────────────────────────────
 
 st.subheader("Sources")
-KNOWN = ("otodom", "olx", "morizon", "komornik", "bzp")
+KNOWN = ("otodom", "olx", "morizon", "komornik")
 enabled_now = [s for s in KNOWN if s not in override.disabled_sources]
 picked_sources = st.multiselect("Enabled sources", KNOWN, default=enabled_now)
 new_disabled = [s for s in KNOWN if s not in picked_sources]
@@ -174,7 +174,7 @@ if col_save.button("💾 Save overrides", type="primary"):
         paused=paused,
     )
     upsert_chat_override(picked, row.title, new_override)
-    st.success("Saved. The next scan (≤ 15 min) will pick this up.")
+    st.success("Saved. The next scan will pick this up, or run /scan in Telegram.")
     st.rerun()
 
 if col_reset.button("↩ Reset all overrides"):

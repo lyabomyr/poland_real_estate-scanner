@@ -130,6 +130,13 @@ class EffectiveConfig:
             or (self.baseline.get("notifications") or {}).get("min_group_size", 3)
         )
 
+    def dashboard_url(self) -> Optional[str]:
+        url = ((self.baseline.get("notifications") or {}).get("dashboard_url") or "").strip()
+        return url or None
+
+    def parse_mode(self) -> str:
+        return ((self.baseline.get("telegram") or {}).get("parse_mode") or "HTML").strip() or "HTML"
+
     def enabled_source_configs(self) -> Dict[str, dict]:
         """Return ``{source_name: source_config_dict}`` with the chat's
         disabled sources filtered out and its URL overrides applied."""
@@ -146,3 +153,6 @@ class EffectiveConfig:
                 merged["url"] = url_override
             out[name] = merged
         return out
+
+    def enabled_source_names(self) -> List[str]:
+        return list(self.enabled_source_configs().keys())

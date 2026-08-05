@@ -1,4 +1,4 @@
-.PHONY: help install run dry config clean reset-db
+.PHONY: help install run dry config clean reset-db test
 
 help:
 	@awk 'BEGIN{FS=":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z_-]+:.*##/{printf "  \033[36m%-12s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
@@ -28,7 +28,10 @@ prune: config  ## archive + delete rejected rows older than storage.prune_reject
 	poetry run python main.py --prune
 
 lint:  ## static-check for unused imports / undefined names
-	poetry run pyflakes scanner/ main.py
+	poetry run pyflakes scanner/ main.py api scripts tests
+
+test:  ## run unit tests
+	poetry run python -m unittest discover -s tests -v
 
 greet: config  ## announce chat_id in every chat the bot has newly joined
 	poetry run python main.py --greet-chats

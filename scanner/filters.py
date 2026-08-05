@@ -22,6 +22,7 @@ class ListingFilter:
         self.min_area = min_area
         self.max_price = max_price
         self.min_build_year = min_build_year
+        self.reject_keywords = list(reject_keywords)
         # Prefix-match on a word boundary — Polish inflection routinely
         # appends 1–3 chars ("udział" → "udziału", "wielkopłyt" →
         # "wielkopłytowy"). A strict full-word match would miss all these.
@@ -29,7 +30,7 @@ class ListingFilter:
         # Same convention as :mod:`scanner.scoring` — keep them consistent.
         self._reject_patterns = [
             re.compile(rf"(?<!\w){re.escape(k)}", re.IGNORECASE)
-            for k in reject_keywords
+            for k in self.reject_keywords
         ]
 
     def accepts(self, l: Listing) -> Tuple[bool, str]:
@@ -52,3 +53,23 @@ class ListingFilter:
             if p.search(haystack):
                 return False, f"keyword {p.pattern!r}"
         return True, ""
+
+    def describe(self, max_area: Optional[float] = None) -> list[str]:
+        """Human-readable rule list built from the same thresholds we execute."""
+        rules = [
+            f"reject if price is known and > {self.max_price}",
+            f"reject if area is known and < {self.min_area}",
+        ]
+        if max_area is not None:
+            rules.append(f"reject if area is known and > {max_area}")
+        if self.min_build_year is not None:
+            rules.append(
+                f"reject if build_year is known and < {self.min_build_year}"
+            )
+        if self.reject_keywords:
+            rules.append(
+                "reject if title/description/location matches any reject keyword: "
+                + ", ".join(self.reject_keywords)
+            )
+        rules.append("missing price / area / build_year never reject by themselves")
+        return rules

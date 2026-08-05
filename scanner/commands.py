@@ -1,84 +1,91 @@
 """Telegram command routing.
 
-The scanner polls ``getUpdates`` once per run (already used for chat auto-
-discovery). Any ``message`` starting with ``/`` is parsed and dispatched
-here. Every command mutates the sending chat's :class:`ChatOverride` row
-in ``chat_configs``; the pipeline picks up changes on its next run.
-
-Commands are grouped semantically for :meth:`_cmd_help`:
-
-* ``/help`` ``/status``                    — introspection
-* ``/max_price`` ``/min_area`` ``/max_area`` ``/min_year`` — numeric knobs
-* ``/reset FIELD``                         — clear one override
-* ``/source NAME on|off``                  — toggle a data source
-* ``/source NAME url URL``                 — custom URL for a source
-* ``/kw + NAME [WEIGHT]``                  — positive scoring keyword
-* ``/kw - NAME [WEIGHT]``                  — negative scoring keyword
-* ``/kw reject NAME``                      — extra reject keyword
-* ``/kw del NAME``                         — remove a keyword override
-* ``/kw list``                             — list current keyword overrides
-* ``/pause`` / ``/resume``                 — skip / re-enable sending here
-* ``/stats [N]``                           — emitted count last N days
-
-Robustness rules:
-
-* One handler per command; a bad argument returns an error string to the
-  chat instead of raising — a broken command should never break the scan.
-* Each ``update_id`` is recorded in ``command_updates`` before dispatch so
-  restarts and cron overlap can't double-fire a mutation.
+The command layer is shared by the polling fallback (local dev) and the
+webhook endpoint (production serverless). Every command works against the
+same Turso-backed chat config rows, so Telegram, GitHub Actions and the
+Streamlit UI all see the same effective runtime state.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-from dataclasses import asdict
+import os
+from dataclasses import asdict, dataclass
 from typing import Callable, Dict, List, Optional
 
 import requests
 
-from .chat_config import ChatOverride
+from .chat_config import ChatOverride, EffectiveConfig
 from .chat_repo import ChatConfigRepo
-from .telegram import default_reply_keyboard
+from .github_actions import GitHubWorkflowDispatcher
+from .introspection import (
+    dashboard_url_from_cfg,
+    format_config_report,
+    format_decision_tree,
+    format_urls_report,
+    number_chunks,
+    split_telegram_text,
+)
+from .telegram import default_reply_keyboard, get_chat_member_status, send_message
 
 log = logging.getLogger(__name__)
 
 _TG_API = "https://api.telegram.org/bot{token}/{method}"
+_KNOWN_SOURCES = ("otodom", "olx", "morizon", "komornik")
 
-# Baseline source names — commands validate against this so /source olx off
-# doesn't silently accept typos.
-_KNOWN_SOURCES = ("otodom", "olx", "morizon", "komornik", "bzp")
+
+@dataclass
+class BotReply:
+    text: str
+    parse_mode: Optional[str] = "HTML"
+    disable_web_page_preview: bool = True
+
+
+@dataclass
+class CommandContext:
+    chat_id: str
+    chat_title: Optional[str]
+    chat_type: Optional[str]
+    user_id: Optional[int]
+    user_name: Optional[str]
+    message_id: Optional[int]
 
 
 class CommandRouter:
-    """Reads pending Telegram updates, dispatches ``/commands`` to handlers."""
+    """Reads Telegram updates and dispatches ``/commands`` to handlers."""
 
     def __init__(
         self,
         bot_token: str,
         repo: ChatConfigRepo,
         baseline_cfg: dict,
+        *,
+        env: Optional[dict] = None,
     ):
         self.bot_token = bot_token
         self.repo = repo
         self.baseline_cfg = baseline_cfg
-        self._handlers: Dict[str, Callable[[List[str], ChatOverride], str]] = {
-            "help":        lambda a, o: self._cmd_help(),
-            "start":       lambda a, o: self._cmd_help(),
-            "status":      self._cmd_status,
-            "max_price":   lambda a, o: self._set_int(a, o, "max_price"),
-            "min_area":    lambda a, o: self._set_float(a, o, "min_area"),
-            "max_area":    lambda a, o: self._set_float(a, o, "max_area"),
-            "min_year":    lambda a, o: self._set_int(a, o, "min_build_year"),
-            "reset":       self._cmd_reset,
-            "source":      self._cmd_source,
-            "kw":          self._cmd_kw,
-            "pause":       lambda a, o: self._cmd_pause(o, True),
-            "resume":      lambda a, o: self._cmd_pause(o, False),
-            "stats":       self._cmd_stats,
+        self.env = os.environ if env is None else env
+        self._handlers: Dict[str, Callable[[List[str], ChatOverride, CommandContext], List[BotReply]]] = {
+            "help": lambda a, o, c: self._cmd_help(),
+            "start": lambda a, o, c: self._cmd_help(),
+            "status": self._cmd_status,
+            "config": self._cmd_config,
+            "urls": self._cmd_urls,
+            "decision_tree": self._cmd_decision_tree,
+            "dashboard": lambda a, o, c: self._cmd_dashboard(),
+            "scan": self._cmd_scan,
+            "max_price": lambda a, o, c: self._set_int(a, o, "max_price"),
+            "min_area": lambda a, o, c: self._set_float(a, o, "min_area"),
+            "max_area": lambda a, o, c: self._set_float(a, o, "max_area"),
+            "min_year": lambda a, o, c: self._set_int(a, o, "min_build_year"),
+            "reset": self._cmd_reset,
+            "source": self._cmd_source,
+            "kw": self._cmd_kw,
+            "pause": lambda a, o, c: self._cmd_pause(o, True),
+            "resume": lambda a, o, c: self._cmd_pause(o, False),
+            "stats": self._cmd_stats,
         }
-
-    # ── entrypoint ────────────────────────────────────────────────────
 
     def process_pending(self) -> int:
         """Fetch new getUpdates, dispatch every ``/…`` message. Returns count."""
@@ -100,265 +107,396 @@ class CommandRouter:
 
         handled = 0
         for upd in data.get("result", []) or []:
-            update_id = upd.get("update_id")
-            if update_id is None or self.repo.is_update_processed(update_id):
-                continue
-            msg = upd.get("message") or upd.get("channel_post") or {}
-            text = (msg.get("text") or "").strip()
-            chat = msg.get("chat") or {}
-            chat_id = chat.get("id")
-            if not text.startswith("/") or chat_id is None:
-                # Still mark so we don't re-inspect it next run.
-                self.repo.mark_update_processed(update_id)
-                continue
-            reply = self._dispatch(chat_id, chat.get("title") or chat.get("first_name"), text)
-            self.repo.mark_update_processed(update_id)
-            if reply:
-                self._send(chat_id, reply)
-                log.info("command router: chat=%s cmd=%r", chat_id, text[:60])
-            handled += 1
+            handled += 1 if self.process_update(upd) else 0
         return handled
 
-    # ── dispatch ──────────────────────────────────────────────────────
+    def process_update(self, upd: dict) -> bool:
+        """Process one Telegram update dict. Returns True if it was a command."""
+        update_id = upd.get("update_id")
+        if update_id is None or not self.repo.claim_update(update_id):
+            return False
 
-    def _dispatch(self, chat_id, chat_title: Optional[str], text: str) -> str:
-        # Split "/cmd@botname arg1 arg2" → ("cmd", ["arg1", "arg2"])
+        msg = upd.get("message") or upd.get("channel_post") or {}
+        text = (msg.get("text") or "").strip()
+        chat = msg.get("chat") or {}
+        chat_id = chat.get("id")
+        if not text.startswith("/") or chat_id is None:
+            return False
+
+        ctx = CommandContext(
+            chat_id=str(chat_id),
+            chat_title=chat.get("title") or chat.get("first_name"),
+            chat_type=chat.get("type"),
+            user_id=(msg.get("from") or {}).get("id"),
+            user_name=(msg.get("from") or {}).get("username")
+            or (msg.get("from") or {}).get("first_name"),
+            message_id=msg.get("message_id"),
+        )
+        self.repo.register_chat(ctx.chat_id, ctx.chat_title)
+        replies = self._dispatch(ctx, text)
+        if not replies:
+            return True
+        for reply in replies:
+            self._send(ctx.chat_id, reply, reply_to_message_id=ctx.message_id)
+        log.info("command router: chat=%s cmd=%r", ctx.chat_id, text[:80])
+        return True
+
+    def _dispatch(self, ctx: CommandContext, text: str) -> List[BotReply]:
         parts = text.split()
-        head = parts[0][1:].lower()
-        head = head.split("@", 1)[0]   # strip @botname if present
+        head = parts[0][1:].lower().split("@", 1)[0]
         args = parts[1:]
 
-        row = self.repo.get(chat_id)
+        row = self.repo.get(ctx.chat_id)
         override = row.override if row else ChatOverride()
-        title = chat_title or (row.title if row else None)
+        title = ctx.chat_title or (row.title if row else None)
 
         handler = self._handlers.get(head)
         if not handler:
-            return f"Unknown command: /{head}. Try /help."
+            return [BotReply(f"Unknown command: /{head}. Try /help.")]
         try:
-            reply = handler(args, override)
+            replies = handler(args, override, ctx)
         except Exception as e:
             log.exception("command %s failed", head)
-            return f"⚠️ /{head} failed: {e}"
+            return [BotReply(f"⚠️ /{head} failed: {e}")]
 
-        # Persist any override mutations (paused=True path uses the same
-        # write). enabled=1 by default — /pause flips paused inside override.
-        self.repo.upsert(chat_id, title, override, enabled=True)
-        return reply
+        self.repo.upsert(ctx.chat_id, title, override, enabled=True)
+        return replies
 
-    # ── handlers ──────────────────────────────────────────────────────
+    def _cmd_help(self) -> List[BotReply]:
+        lines = [
+            "<b>Commands</b>",
+            "/status — short summary for this chat",
+            "/config — full effective runtime config (chunked if long)",
+            "/urls — public runtime URLs",
+            "/decision_tree — current accept/reject/notify logic",
+            "/dashboard — link to the Streamlit dashboard",
+            "/scan — queue an immediate GitHub Actions scan",
+            "/max_price N — override max price (PLN)",
+            "/min_area N — override min area (m²)",
+            "/max_area N — set an upper area cap",
+            "/min_year Y — earliest build year accepted",
+            "/source NAME on|off — enable/disable a data source",
+            "/source NAME url URL — custom URL for a source (this chat only)",
+            "/kw + NAME [WEIGHT] — add positive scoring keyword",
+            "/kw - NAME [WEIGHT] — add negative scoring keyword",
+            "/kw reject NAME — add reject-filter keyword",
+            "/kw del NAME — remove a keyword override",
+            "/kw list — show keyword overrides",
+            "/reset FIELD — clear one override (e.g. /reset max_price)",
+            "/reset all — clear all overrides",
+            "/pause — stop receiving matches here",
+            "/resume — resume receiving",
+            "/stats [N] — emitted count over the last N days (default 7)",
+            "",
+            f"Sources: {', '.join(_KNOWN_SOURCES)}",
+        ]
+        url = self._dashboard_url()
+        if url:
+            lines.append(f"\n📊 Dashboard: {url}")
+        return [BotReply("\n".join(lines))]
 
-    def _cmd_help(self) -> str:
-        return (
-            "<b>Commands</b>\n"
-            "/status — show current effective config here\n"
-            "/max_price N — override max price (PLN)\n"
-            "/min_area N — override min area (m²)\n"
-            "/max_area N — set an upper area cap\n"
-            "/min_year Y — earliest build year accepted\n"
-            "/source NAME on|off — enable/disable a data source\n"
-            "/source NAME url URL — custom URL for a source (this chat only)\n"
-            "/kw + NAME [WEIGHT] — add positive scoring keyword\n"
-            "/kw - NAME [WEIGHT] — add negative scoring keyword\n"
-            "/kw reject NAME — add reject-filter keyword\n"
-            "/kw del NAME — remove a keyword override\n"
-            "/kw list — show keyword overrides\n"
-            "/reset FIELD — clear one override (e.g. /reset max_price)\n"
-            "/reset all — clear all overrides\n"
-            "/pause — stop receiving matches here\n"
-            "/resume — resume receiving\n"
-            "/stats [N] — emitted count over last N days (default 7)\n\n"
-            f"Sources available: {', '.join(_KNOWN_SOURCES)}"
+    def _cmd_dashboard(self) -> List[BotReply]:
+        url = self._dashboard_url()
+        if not url:
+            return [
+                BotReply(
+                    "No dashboard URL configured yet.\n\n"
+                    "Deploy the <code>dashboard/</code> app and set "
+                    "<code>DASHBOARD_URL</code> as a GitHub Actions variable "
+                    "(or <code>notifications.dashboard_url</code> locally)."
+                )
+            ]
+        return [BotReply(f"📊 Dashboard: {url}")]
+
+    def _cmd_status(self, args, override: ChatOverride, ctx: CommandContext) -> List[BotReply]:
+        ec = EffectiveConfig(baseline=self.baseline_cfg, override=override)
+        lines = [
+            "<b>Status for this chat</b>",
+            "",
+            f"max_price: {ec.max_price()} PLN",
+            f"min_area: {ec.min_area():g} m²",
+            f"max_area: {ec.max_area():g} m²" if ec.max_area() is not None else "max_area: off",
+            (
+                f"min_year: {ec.min_build_year()}"
+                if ec.min_build_year() is not None
+                else "min_year: off"
+            ),
+            f"sources: {', '.join(ec.enabled_source_names()) or '(none)'}",
+            f"group notifications: {ec.min_group_size()}+ similar listings",
+        ]
+        if override.paused:
+            lines.append("⏸️ paused — /resume to re-enable")
+        stats = self.repo.stats_last_days(ctx.chat_id, 7)
+        lines.append(f"delivered last 7 days: {stats['emitted']}")
+        url = ec.dashboard_url()
+        if url:
+            lines.append(f"\n📊 Dashboard: {url}")
+        lines.append("")
+        lines.append("<i>Use /config for the full effective runtime config.</i>")
+        return [BotReply("\n".join(lines))]
+
+    def _cmd_config(self, args, override: ChatOverride, ctx: CommandContext) -> List[BotReply]:
+        return self._chunked_plain_reply(
+            format_config_report(self.baseline_cfg, override),
+            title="/config",
         )
 
-    def _cmd_status(self, args, override: ChatOverride) -> str:
-        lines = ["<b>Effective config for this chat</b>", ""]
-        b = self.baseline_cfg
-        lines.append(f"max_price: {override.max_price or b['search']['max_price']}"
-                     f"{' *' if override.max_price else ''}")
-        lines.append(f"min_area:  {override.min_area or b['search']['min_area']}"
-                     f"{' *' if override.min_area else ''}")
-        if override.max_area:
-            lines.append(f"max_area:  {override.max_area} *")
-        year = override.min_build_year
-        if year is None:
-            year = b.get('search', {}).get('min_build_year')
-        lines.append(f"min_year:  {year if year is not None else 'off'}"
-                     f"{' *' if override.min_build_year is not None else ''}")
+    def _cmd_urls(self, args, override: ChatOverride, ctx: CommandContext) -> List[BotReply]:
+        return self._chunked_plain_reply(
+            format_urls_report(self.baseline_cfg, override),
+            title="/urls",
+        )
 
-        srcs = [s for s in _KNOWN_SOURCES if s not in override.disabled_sources]
-        lines.append(f"sources:   {', '.join(srcs)}")
-        if override.source_urls:
-            for k, v in override.source_urls.items():
-                lines.append(f"  {k} url = {v[:60]}…" if len(v) > 60 else f"  {k} url = {v}")
+    def _cmd_decision_tree(
+        self,
+        args,
+        override: ChatOverride,
+        ctx: CommandContext,
+    ) -> List[BotReply]:
+        return self._chunked_plain_reply(
+            format_decision_tree(self.baseline_cfg, override),
+            title="/decision_tree",
+        )
 
-        if override.extra_reject:
-            lines.append(f"extra reject_kw: {', '.join(override.extra_reject)}")
-        if override.extra_positive:
-            lines.append(f"extra +kw: {', '.join(_kw_repr(k) for k in override.extra_positive)}")
-        if override.extra_negative:
-            lines.append(f"extra -kw: {', '.join(_kw_repr(k) for k in override.extra_negative)}")
-        if override.weights:
-            lines.append(f"weight overrides: {override.weights}")
-        if override.paused:
-            lines.append("⏸️ <b>paused</b> — /resume to re-enable")
-        lines.append("")
-        lines.append("<i>* = overridden here vs. baseline YAML</i>")
-        return "\n".join(lines)
+    def _cmd_scan(self, args, override: ChatOverride, ctx: CommandContext) -> List[BotReply]:
+        denied = self._scan_permission_error(ctx)
+        if denied:
+            return [BotReply(denied, parse_mode=None)]
 
-    def _set_int(self, args, override: ChatOverride, attr: str) -> str:
+        dispatcher = GitHubWorkflowDispatcher.from_env(env=self.env)
+        if dispatcher is None:
+            return [
+                BotReply(
+                    "Scanner dispatch is not configured.\n\n"
+                    "Missing one of: GITHUB_WORKFLOW_TOKEN, "
+                    "GITHUB_REPOSITORY_OWNER, GITHUB_REPOSITORY_NAME, "
+                    "GITHUB_SCAN_WORKFLOW_FILE, GITHUB_SCAN_WORKFLOW_REF.",
+                    parse_mode=None,
+                )
+            ]
+        result = dispatcher.dispatch_scan(
+            trigger_chat_id=ctx.chat_id,
+            trigger_chat_title=ctx.chat_title,
+            trigger_user_id=ctx.user_id,
+            trigger_user_name=ctx.user_name,
+            command="scan",
+        )
+        lines = [
+            "Scan queued.",
+            "The GitHub Actions run will send a Telegram summary here when it finishes.",
+        ]
+        if result.workflow_run_id:
+            lines.append(f"workflow_run_id: {result.workflow_run_id}")
+        if result.html_url:
+            lines.append(result.html_url)
+        return [BotReply("\n".join(lines), parse_mode=None)]
+
+    def _set_int(self, args, override: ChatOverride, attr: str) -> List[BotReply]:
         if not args:
-            return f"Usage: /{attr} N (integer)"
+            return [BotReply(f"Usage: /{attr} N (integer)", parse_mode=None)]
         try:
-            v = int(args[0])
+            value = int(args[0])
         except ValueError:
-            return f"'{args[0]}' is not an integer."
-        setattr(override, attr, v)
-        return f"✓ {attr} = {v}"
+            return [BotReply(f"'{args[0]}' is not an integer.", parse_mode=None)]
+        setattr(override, attr, value)
+        return [BotReply(f"✓ {attr} = {value}", parse_mode=None)]
 
-    def _set_float(self, args, override: ChatOverride, attr: str) -> str:
+    def _set_float(self, args, override: ChatOverride, attr: str) -> List[BotReply]:
         if not args:
-            return f"Usage: /{attr} N"
+            return [BotReply(f"Usage: /{attr} N", parse_mode=None)]
         try:
-            v = float(args[0].replace(",", "."))
+            value = float(args[0].replace(",", "."))
         except ValueError:
-            return f"'{args[0]}' is not a number."
-        setattr(override, attr, v)
-        return f"✓ {attr} = {v}"
+            return [BotReply(f"'{args[0]}' is not a number.", parse_mode=None)]
+        setattr(override, attr, value)
+        return [BotReply(f"✓ {attr} = {value:g}", parse_mode=None)]
 
-    def _cmd_reset(self, args, override: ChatOverride) -> str:
+    def _cmd_reset(self, args, override: ChatOverride, ctx: CommandContext) -> List[BotReply]:
         if not args:
-            return "Usage: /reset FIELD  (or /reset all)"
+            return [BotReply("Usage: /reset FIELD  (or /reset all)", parse_mode=None)]
         field = args[0].lower()
         if field == "all":
-            # Blow away every override — replace with a fresh empty one.
             override.__dict__.update(asdict(ChatOverride()))
-            return "✓ all overrides cleared"
-        # Numeric / boolean / list attributes — set to their dataclass default.
+            return [BotReply("✓ all overrides cleared", parse_mode=None)]
         empty = ChatOverride()
         if not hasattr(empty, field):
-            return f"Unknown field '{field}'."
+            return [BotReply(f"Unknown field '{field}'.", parse_mode=None)]
         setattr(override, field, getattr(empty, field))
-        return f"✓ {field} reset to baseline"
+        return [BotReply(f"✓ {field} reset to baseline", parse_mode=None)]
 
-    def _cmd_source(self, args, override: ChatOverride) -> str:
+    def _cmd_source(self, args, override: ChatOverride, ctx: CommandContext) -> List[BotReply]:
         if len(args) < 2:
-            return "Usage: /source NAME on|off   OR   /source NAME url URL"
+            return [BotReply("Usage: /source NAME on|off   OR   /source NAME url URL", parse_mode=None)]
         name = args[0].lower()
         if name not in _KNOWN_SOURCES:
-            return f"Unknown source '{name}'. Try one of: {', '.join(_KNOWN_SOURCES)}"
+            return [
+                BotReply(
+                    f"Unknown source '{name}'. Try one of: {', '.join(_KNOWN_SOURCES)}",
+                    parse_mode=None,
+                )
+            ]
         verb = args[1].lower()
         if verb in ("on", "enable"):
             override.disabled_sources = [s for s in override.disabled_sources if s != name]
-            return f"✓ source {name} enabled for this chat"
+            return [BotReply(f"✓ source {name} enabled for this chat", parse_mode=None)]
         if verb in ("off", "disable"):
             if name not in override.disabled_sources:
                 override.disabled_sources.append(name)
-            return f"✓ source {name} disabled for this chat"
+            return [BotReply(f"✓ source {name} disabled for this chat", parse_mode=None)]
         if verb == "url":
             if len(args) < 3:
-                return "Usage: /source NAME url URL"
+                return [BotReply("Usage: /source NAME url URL", parse_mode=None)]
             url = " ".join(args[2:])
             override.source_urls[name] = url
-            return f"✓ source {name} URL set for this chat"
-        return "Usage: /source NAME on|off   OR   /source NAME url URL"
+            return [BotReply(f"✓ source {name} URL set for this chat", parse_mode=None)]
+        return [BotReply("Usage: /source NAME on|off   OR   /source NAME url URL", parse_mode=None)]
 
-    def _cmd_kw(self, args, override: ChatOverride) -> str:
+    def _cmd_kw(self, args, override: ChatOverride, ctx: CommandContext) -> List[BotReply]:
         if not args:
-            return "Usage: /kw + NAME [W]  |  /kw - NAME [W]  |  /kw reject NAME  |  /kw del NAME  |  /kw list"
+            return [
+                BotReply(
+                    "Usage: /kw + NAME [W]  |  /kw - NAME [W]  |  /kw reject NAME  |  /kw del NAME  |  /kw list",
+                    parse_mode=None,
+                )
+            ]
         verb = args[0].lower()
         if verb == "list":
-            return _describe_keywords(override)
+            return [BotReply(_describe_keywords(override))]
         if verb in ("+", "add+", "positive"):
-            return _add_kw(override.extra_positive, args[1:], sign="+")
+            return [_add_kw(override.extra_positive, args[1:], sign="+")]
         if verb in ("-", "add-", "negative"):
-            return _add_kw(override.extra_negative, args[1:], sign="-")
+            return [_add_kw(override.extra_negative, args[1:], sign="-")]
         if verb == "reject":
             if len(args) < 2:
-                return "Usage: /kw reject NAME"
+                return [BotReply("Usage: /kw reject NAME", parse_mode=None)]
             name = " ".join(args[1:])
             if name in override.extra_reject:
-                return f"'{name}' already in extra reject list"
+                return [BotReply(f"'{name}' already in extra reject list", parse_mode=None)]
             override.extra_reject.append(name)
-            return f"✓ reject '{name}' added for this chat"
+            return [BotReply(f"✓ reject '{name}' added for this chat", parse_mode=None)]
         if verb == "del":
             if len(args) < 2:
-                return "Usage: /kw del NAME"
+                return [BotReply("Usage: /kw del NAME", parse_mode=None)]
             name = " ".join(args[1:])
             removed = _remove_kw_from_all(override, name)
-            return f"✓ removed '{name}' from {removed} override list(s)" if removed else \
-                   f"'{name}' not found in any override"
-        return "Unknown /kw sub-command. Try /kw list."
+            if removed:
+                return [BotReply(f"✓ removed '{name}' from {removed} override list(s)", parse_mode=None)]
+            return [BotReply(f"'{name}' not found in any override", parse_mode=None)]
+        return [BotReply("Unknown /kw sub-command. Try /kw list.", parse_mode=None)]
 
-    def _cmd_pause(self, override: ChatOverride, pause: bool) -> str:
+    def _cmd_pause(self, override: ChatOverride, pause: bool) -> List[BotReply]:
         override.paused = pause
-        return "⏸️ paused — /resume to re-enable" if pause else "▶️ resumed"
+        return [BotReply("⏸️ paused — /resume to re-enable" if pause else "▶️ resumed", parse_mode=None)]
 
-    def _cmd_stats(self, args, override: ChatOverride) -> str:
+    def _cmd_stats(self, args, override: ChatOverride, ctx: CommandContext) -> List[BotReply]:
         days = 7
         if args:
             try:
                 days = max(1, min(90, int(args[0])))
             except ValueError:
-                return f"'{args[0]}' is not an integer."
-        # We need chat_id to compute — dispatch stored the row via upsert
-        # already. Read fresh; the repo returns the latest.
-        # (Not fatal if we can't find; report zero.)
-        return f"Stats for last {days} days: use the Streamlit dashboard for full charts."
+                return [BotReply(f"'{args[0]}' is not an integer.", parse_mode=None)]
+        stats = self.repo.stats_last_days(ctx.chat_id, days)
+        lines = [f"Delivered in the last {days} day(s): {stats['emitted']}"]
+        url = self._dashboard_url()
+        if url:
+            lines.append(f"Dashboard: {url}")
+        return [BotReply("\n".join(lines), parse_mode=None)]
 
-    # ── outbound ──────────────────────────────────────────────────────
+    def _chunked_plain_reply(self, text: str, *, title: str) -> List[BotReply]:
+        chunks = number_chunks(split_telegram_text(text, limit=3900), title)
+        return [BotReply(chunk, parse_mode=None) for chunk in chunks]
 
-    def _send(self, chat_id, text: str) -> None:
+    def _dashboard_url(self) -> Optional[str]:
+        return dashboard_url_from_cfg(self.baseline_cfg)
+
+    def _scan_permission_error(self, ctx: CommandContext) -> Optional[str]:
+        allowed_chats = self._parse_csv_ids(
+            self.env.get("TG_WORKFLOW_ALLOWED_CHAT_IDS")
+            or ((self.baseline_cfg.get("telegram") or {}).get("chat_id") or "")
+        )
+        if not allowed_chats or ctx.chat_id not in allowed_chats:
+            return (
+                "This chat is not allowed to dispatch GitHub scanner workflows.\n\n"
+                "Set TG_WORKFLOW_ALLOWED_CHAT_IDS (or TG_CHAT_ID fallback) to the chat IDs "
+                "that may use /scan."
+            )
+
+        allowed_users = self._parse_csv_ids(self.env.get("TG_WORKFLOW_ALLOWED_USER_IDS", ""))
+        if allowed_users and (ctx.user_id is None or str(ctx.user_id) not in allowed_users):
+            return "Your Telegram user is not allowed to dispatch scanner workflows from this bot."
+
+        if ctx.chat_type in {"group", "supergroup"}:
+            if ctx.user_id is None:
+                return "Scanner workflows can only be started by a chat administrator."
+            # Authorization check — fail *closed*. A transient Telegram error
+            # (network blip, 429, bot removed from the chat) must deny the
+            # dispatch rather than bubble up as a generic "/scan failed"
+            # traceback or, worse, be mistaken for a pass.
+            try:
+                status = get_chat_member_status(self.bot_token, ctx.chat_id, ctx.user_id)
+            except Exception as e:
+                log.warning(
+                    "scan auth: getChatMember failed for chat=%s user=%s: %s",
+                    ctx.chat_id, ctx.user_id, e,
+                )
+                return (
+                    "Could not verify your admin status with Telegram, so /scan was "
+                    "not dispatched. Check that the bot is still in this chat, then retry."
+                )
+            if status not in {"administrator", "creator"}:
+                return "Only chat administrators may run /scan."
+        return None
+
+    def _parse_csv_ids(self, raw: str) -> set[str]:
+        return {part.strip() for part in (raw or "").split(",") if part.strip()}
+
+    def _send(self, chat_id: str, reply: BotReply, *, reply_to_message_id: Optional[int] = None) -> None:
         try:
-            requests.post(
-                _TG_API.format(token=self.bot_token, method="sendMessage"),
-                data={
-                    "chat_id": chat_id,
-                    "text": text,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": "true",
-                    # Attach the persistent menu on every command reply so
-                    # a user who cleared it (or first-time messengers who
-                    # never got the greeting) still gets the buttons.
-                    "reply_markup": json.dumps(default_reply_keyboard()),
-                },
-                timeout=15,
+            send_message(
+                self.bot_token,
+                chat_id,
+                text=reply.text,
+                parse_mode=reply.parse_mode,
+                disable_web_page_preview=reply.disable_web_page_preview,
+                reply_markup=default_reply_keyboard(),
+                reply_to_message_id=reply_to_message_id,
             )
         except Exception as e:
             log.error("command router: reply to %s failed: %s", chat_id, e)
 
 
-# ── helpers ────────────────────────────────────────────────────────────
-
-def _add_kw(target: list, args: list, sign: str) -> str:
+def _add_kw(target: list, args: list, sign: str) -> BotReply:
     if not args:
-        return f"Usage: /kw {sign} NAME [W]"
+        return BotReply(f"Usage: /kw {sign} NAME [W]", parse_mode=None)
     name = args[0]
     weight: Optional[int] = None
     if len(args) >= 2:
         try:
             weight = int(args[1])
         except ValueError:
-            return f"'{args[1]}' is not an integer weight."
+            return BotReply(f"'{args[1]}' is not an integer weight.", parse_mode=None)
     entry = {"name": name, "weight": weight} if weight is not None else name
-    # Skip duplicates (compare on name only).
     for existing in target:
         existing_name = existing["name"] if isinstance(existing, dict) else existing
         if existing_name == name:
-            return f"'{name}' already in {sign} keyword list"
+            return BotReply(f"'{name}' already in {sign} keyword list", parse_mode=None)
     target.append(entry)
-    return f"✓ {sign} '{name}'" + (f" (weight {weight})" if weight else "")
+    tail = f" (weight {weight})" if weight is not None else ""
+    return BotReply(f"✓ {sign} '{name}'{tail}", parse_mode=None)
 
 
 def _remove_kw_from_all(override: ChatOverride, name: str) -> int:
-    def _prune(lst):
-        out = [e for e in lst if _kw_name(e) != name]
-        removed = len(lst) - len(out)
-        return out, removed
+    def _prune(values):
+        out = [entry for entry in values if _kw_name(entry) != name]
+        return out, len(values) - len(out)
+
     total = 0
-    override.extra_positive, r = _prune(override.extra_positive); total += r
-    override.extra_negative, r = _prune(override.extra_negative); total += r
-    override.extra_reject,   r = _prune(override.extra_reject);   total += r
+    override.extra_positive, removed = _prune(override.extra_positive)
+    total += removed
+    override.extra_negative, removed = _prune(override.extra_negative)
+    total += removed
+    override.extra_reject, removed = _prune(override.extra_reject)
+    total += removed
     return total
 
 
@@ -368,8 +506,8 @@ def _kw_name(entry) -> str:
 
 def _kw_repr(entry) -> str:
     if isinstance(entry, dict):
-        w = entry.get("weight")
-        return f"{entry['name']}({w:+})" if w is not None else entry["name"]
+        weight = entry.get("weight")
+        return f"{entry['name']}({weight:+})" if weight is not None else entry["name"]
     return str(entry)
 
 

@@ -35,28 +35,11 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
 
-      - name: Render config from secrets
-        env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID:   ${{ secrets.TG_CHAT_ID }}
-        run: |
-          cp config.example.yml config.yml
-          python - <<'PY'
-          import os, pathlib
-          p = pathlib.Path("config.yml")
-          text = p.read_text(encoding="utf-8")
-          text = text.replace('bot_token: "REPLACE_WITH_BOT_TOKEN"',
-                              f'bot_token: "{os.environ["TG_BOT_TOKEN"]}"')
-          text = text.replace('chat_id: ""',
-                              f'chat_id: "{os.environ["TG_CHAT_ID"]}"')
-          p.write_text(text, encoding="utf-8")
-          PY
-
       - name: Prune
         env:
           TURSO_URL:        ${{ secrets.TURSO_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
-        run: poetry run python main.py --prune
+        run: poetry run python main.py --config config.example.yml --prune
 
       - name: Commit archive CSVs
         run: |

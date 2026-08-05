@@ -43,6 +43,11 @@ Without the two `TURSO_*` vars set, `db.py` falls back to a local
 The app URL will be `https://<slug>.streamlit.app`. Free tier: unlimited
 public apps, no sleep for actively-used ones.
 
+After deploy, copy the final public URL into:
+
+- GitHub Actions variable `DASHBOARD_URL`
+- Vercel env var `DASHBOARD_URL`
+
 ## Pages
 
 * **Main (app.py)** — KPIs, source-mix bar chart, reject-reason bar chart,
@@ -50,8 +55,8 @@ public apps, no sleep for actively-used ones.
 * **📋 Listings** — sortable, filterable table of every matched listing
   (source, price, area, zł/m², URL link, seen-at).
 * **⚙️ Chat config** — per-chat override editor. Save writes to the
-  `chat_configs` table in Turso; the scanner picks up changes on its next
-  15-minute cron tick.
+  `chat_configs` table in Turso; the scanner picks up changes on the next
+  scan, or immediately if you trigger `/scan` from Telegram.
 
 ## Adding a new page
 

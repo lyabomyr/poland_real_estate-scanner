@@ -31,16 +31,17 @@ log = logging.getLogger(__name__)
 def default_reply_keyboard() -> dict:
     """Persistent reply keyboard shown below the chat's input field.
 
-    Two rows of buttons; each button's *text is the exact command it fires*
-    so the bot recognises them in the ``getUpdates`` message payload with
-    zero extra parsing. `is_persistent: true` (Bot API 6.4+) means the
-    keyboard stays open by default instead of hiding behind the tiny
-    "keyboard" icon.
+    Each button's *text is the exact command it fires* so the bot
+    recognises them in the ``getUpdates`` payload with zero extra parsing.
+    `is_persistent: true` (Bot API 6.4+) keeps the keyboard open by default
+    instead of hiding it behind the tiny "keyboard" icon.
     """
     return {
         "keyboard": [
-            [{"text": "/status"}, {"text": "/help"},    {"text": "/stats"}],
-            [{"text": "/kw list"}, {"text": "/pause"}, {"text": "/resume"}],
+            [{"text": "/status"}, {"text": "/help"}, {"text": "/dashboard"}],
+            [{"text": "/config"}, {"text": "/decision_tree"}, {"text": "/urls"}],
+            [{"text": "/stats"}, {"text": "/kw list"}],
+            [{"text": "/pause"}, {"text": "/resume"}],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
@@ -52,9 +53,9 @@ def find_new_chat_memberships(bot_token: str, timeout: int = 10) -> List[dict]:
 
     Reads ``my_chat_member`` updates from getUpdates and keeps only
     transitions into an active state (``member`` / ``administrator``). Used
-    by the auto-greet feature: the scanner announces the chat's id back to
-    the group so the user can pin it in :envvar:`TG_CHAT_ID` without
-    installing a helper bot.
+    by the local polling fallback: the scanner announces the chat's id back
+    to the group so the user can optionally whitelist it for workflow
+    dispatch or use it as a fallback bootstrap.
 
     Only sees events from the last ~24 h — Telegram's default retention.
     """
@@ -90,37 +91,42 @@ def find_new_chat_memberships(bot_token: str, timeout: int = 10) -> List[dict]:
     return list(out.values())
 
 
-def send_greeting(bot_token: str, chat_id, title: Optional[str] = None) -> bool:
+def send_greeting(
+    bot_token: str,
+    chat_id,
+    title: Optional[str] = None,
+    dashboard_url: Optional[str] = None,
+) -> bool:
     """Post a "here's your chat_id" message to the given chat.
 
-    The whole point of this helper is user-facing: a fresh group where the
-    bot was just added gets a message with its ``chat_id`` in a copy-friendly
-    format so the user can plug it into their :envvar:`TG_CHAT_ID` secret.
+    A fresh group where the bot was just added gets its ``chat_id`` in a
+    copy-friendly format plus (if configured) a link to the Streamlit
+    dashboard for GUI-side tuning.
     """
     if not bot_token or bot_token.startswith("REPLACE"):
         return False
     title_line = f"\n<i>{title}</i>" if title else ""
+    dashboard_line = (
+        f"\n\n📊 Dashboard: {dashboard_url}"
+        if dashboard_url else ""
+    )
     text = (
         "👋 <b>Kraków flats scanner</b> is here."
         f"{title_line}\n\n"
         f"Chat ID: <code>{chat_id}</code>"
+        "\nThis chat is already auto-registered. "
+        "Use <code>TG_CHAT_ID</code> only as an optional fallback bootstrap."
+        f"{dashboard_line}"
     )
     try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{bot_token}/sendMessage",
-            data={
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": "true",
-                # Greeting is the first thing users see — good moment to
-                # surface the persistent button menu.
-                "reply_markup": json.dumps(default_reply_keyboard()),
-            },
-            timeout=15,
+        return send_message(
+            bot_token,
+            chat_id,
+            text=text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=default_reply_keyboard(),
         )
-        r.raise_for_status()
-        return True
     except Exception as e:
         log.error("greet: send to %s failed: %s", chat_id, e)
         return False
@@ -130,9 +136,10 @@ def discover_chats(bot_token: str, timeout: int = 10) -> List[dict]:
     """Return chats the bot has *recently* seen activity in.
 
     Uses Telegram ``getUpdates``. Only sees events from ~the last 24 h, and
-    only when no webhook is registered on the bot. Returns dicts with keys
-    ``id`` / ``type`` / ``title``. Empty list on any error — main.py logs a
-    friendly message asking the user to poke the bot to generate an update.
+    only when no webhook is registered on the bot. This is primarily a local
+    development / debugging helper. Returns dicts with keys ``id`` / ``type``
+    / ``title``. Empty list on any error — main.py logs a friendly message
+    asking the user to poke the bot to generate an update.
 
     Caveat: in a group with Privacy Mode ON (BotFather default) the bot only
     sees commands addressed to it, so a plain "hi" won't surface the chat.
@@ -173,6 +180,56 @@ def discover_chats(bot_token: str, timeout: int = 10) -> List[dict]:
                 ),
             }
     return list(seen.values())
+
+
+def send_message(
+    bot_token: str,
+    chat_id,
+    *,
+    text: str,
+    parse_mode: Optional[str] = None,
+    disable_web_page_preview: bool = True,
+    reply_markup: Optional[dict] = None,
+    reply_to_message_id: Optional[int] = None,
+    timeout: int = 15,
+) -> bool:
+    data = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": "true" if disable_web_page_preview else "false",
+    }
+    if parse_mode:
+        data["parse_mode"] = parse_mode
+    if reply_markup is not None:
+        data["reply_markup"] = json.dumps(reply_markup)
+    if reply_to_message_id is not None:
+        data["reply_to_message_id"] = str(reply_to_message_id)
+    r = requests.post(
+        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+        data=data,
+        timeout=timeout,
+    )
+    r.raise_for_status()
+    return True
+
+
+def get_chat_member_status(
+    bot_token: str,
+    chat_id,
+    user_id: int,
+    timeout: int = 15,
+) -> Optional[str]:
+    r = requests.get(
+        f"https://api.telegram.org/bot{bot_token}/getChatMember",
+        params={"chat_id": chat_id, "user_id": user_id},
+        timeout=timeout,
+    )
+    r.raise_for_status()
+    data = r.json()
+    if not data.get("ok"):
+        return None
+    result = data.get("result") or {}
+    return (result.get("status") or "").strip().lower() or None
 
 
 class TelegramNotifier:

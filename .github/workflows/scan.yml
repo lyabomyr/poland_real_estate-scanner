@@ -3,7 +3,28 @@ name: scan
 on:
   schedule:
     - cron: "*/15 * * * *"   # every 15 minutes (GitHub may delay by 5-15 min in peak hours)
-  workflow_dispatch:          # manual "Run workflow" button
+  workflow_dispatch:
+    inputs:
+      trigger_command:
+        description: "Telegram command that triggered this run"
+        required: false
+        type: string
+      trigger_chat_id:
+        description: "Telegram chat ID to reply to when the run finishes"
+        required: false
+        type: string
+      trigger_chat_title:
+        description: "Human-readable Telegram chat title"
+        required: false
+        type: string
+      trigger_user_id:
+        description: "Telegram user ID who requested the run"
+        required: false
+        type: string
+      trigger_user_name:
+        description: "Telegram username/name who requested the run"
+        required: false
+        type: string
 
 concurrency:
   group: scan
@@ -13,6 +34,8 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -31,29 +54,28 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
 
-      - name: Render config from secrets
-        env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID:   ${{ secrets.TG_CHAT_ID }}
-        run: |
-          cp config.example.yml config.yml
-          python - <<'PY'
-          import os, pathlib
-          p = pathlib.Path("config.yml")
-          text = p.read_text(encoding="utf-8")
-          text = text.replace('bot_token: "REPLACE_WITH_BOT_TOKEN"',
-                              f'bot_token: "{os.environ["TG_BOT_TOKEN"]}"')
-          text = text.replace('chat_id: ""',
-                              f'chat_id: "{os.environ["TG_CHAT_ID"]}"')
-          p.write_text(text, encoding="utf-8")
-          PY
-
       - name: Run scanner
         # TURSO_URL + TURSO_AUTH_TOKEN switch the store to hosted libSQL —
         # nothing to commit back after the run because the cloud DB persists
         # everything. Unset them if you want the workflow to use a local
         # SQLite file committed to the repo instead.
         env:
+          TG_BOT_TOKEN:      ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID:        ${{ secrets.TG_CHAT_ID }}
+          TG_WEBHOOK_ENABLED: ${{ vars.TG_WEBHOOK_ENABLED }}
+          DASHBOARD_URL:     ${{ vars.DASHBOARD_URL }}
           TURSO_URL:        ${{ secrets.TURSO_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
-        run: poetry run python main.py
+        run: poetry run python main.py --config config.example.yml --stats-json .tmp/scan-stats.json
+
+      - name: Send Telegram summary for workflow-dispatched scan
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && github.event.inputs.trigger_chat_id != '' && github.event.inputs.trigger_command != '' }}
+        env:
+          TG_BOT_TOKEN:   ${{ secrets.TG_BOT_TOKEN }}
+          SCAN_JOB_STATUS: ${{ job.status }}
+        run: >
+          poetry run python scripts/send_scan_summary.py
+          --chat-id "${{ github.event.inputs.trigger_chat_id }}"
+          --stats-json .tmp/scan-stats.json
+          --command "${{ github.event.inputs.trigger_command }}"
+          --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

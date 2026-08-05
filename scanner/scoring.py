@@ -141,6 +141,38 @@ class DealScorer:
 
         return DealScore(value=max(0, min(100, value)), reasons=reasons)
 
+    def describe_model(self) -> List[str]:
+        """Readable scoring description derived from this scorer's active knobs."""
+        w = self.w
+        lines = [
+            f"base score = {w.base}",
+            (
+                "if median sample count >= "
+                f"{w.min_median_sample}: add price-vs-median signal up to ±{w.ppm2} "
+                f"with full effect at {w.ppm2_full_at * 100:.0f}% deviation"
+            ),
+            (
+                "surface '% vs median' reason only when deviation >= "
+                f"{w.ppm2_reason_threshold * 100:.0f}%"
+            ),
+            (
+                f"if area is known and in [{w.area_sweet_min:g}, {w.area_sweet_max:g}] "
+                f"then add {w.area_sweet_bonus}"
+            ),
+        ]
+        if self._positive:
+            lines.append(
+                "positive keywords: "
+                + ", ".join(f"{r.name}(+{r.weight})" for r in self._positive)
+            )
+        if self._negative:
+            lines.append(
+                "negative keywords: "
+                + ", ".join(f"{r.name}(-{r.weight})" for r in self._negative)
+            )
+        lines.append("final score = clamp(0..100)")
+        return lines
+
 
 # ── helpers ────────────────────────────────────────────────────────────
 

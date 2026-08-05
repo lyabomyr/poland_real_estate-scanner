@@ -268,7 +268,7 @@ def build_chat_context(
     notifier = TelegramNotifier(
         bot_token=bot_token,
         chat_id=row.chat_id,
-        parse_mode=(baseline_cfg.get("telegram") or {}).get("parse_mode", "HTML"),
+        parse_mode=ec.parse_mode(),
     )
 
     return ChatContext(

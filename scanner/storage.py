@@ -101,9 +101,9 @@ _SCHEMA_STMTS = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS chat_emissions_chat_idx ON chat_emissions(chat_id)",
-    # Bot commands ride on the same getUpdates channel as chat auto-discover.
-    # Storing processed update_ids here makes command handling exactly-once
-    # even across scanner restarts.
+    # Processed Telegram update ids (webhook or polling fallback). Storing
+    # them here makes command + greeting handling idempotent across retries
+    # and scanner restarts.
     """
     CREATE TABLE IF NOT EXISTS command_updates (
         update_id    INTEGER PRIMARY KEY,

@@ -10,3 +10,8 @@ data/*
 !data/.gitkeep
 config.yml
 .streamlit/secrets.toml
+# Scanner writes run stats here (--stats-json); the workflow reads it in the
+# next step and it never needs to be committed.
+.tmp/
+# Vercel CLI local state (project linkage, pulled env vars).
+.vercel/

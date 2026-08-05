@@ -13,17 +13,16 @@ CLI shape::
 """
 
 import argparse
+import json
 import logging
 import sys
 from pathlib import Path
+from typing import Optional
 
-import yaml
-
-from scanner.chat_config import ChatOverride
 from scanner.chat_repo import ChatConfigRepo
 from scanner.commands import CommandRouter
 from scanner.pipeline import MultiChatPipeline, build_chat_context
-from scanner.sources.bzp import BzpSource
+from scanner.runtime_config import load_runtime_config, runtime_has_webhook
 from scanner.sources.komornik import KomornikSource
 from scanner.sources.morizon import MorizonSource
 from scanner.sources.olx import OlxSource
@@ -42,13 +41,7 @@ SOURCE_REGISTRY = {
     "olx": OlxSource,
     "morizon": MorizonSource,
     "komornik": KomornikSource,
-    "bzp": BzpSource,
 }
-
-
-def load_config(path: str) -> dict:
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
 
 
 # ── CLI ────────────────────────────────────────────────────────────────
@@ -64,6 +57,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="archive + delete rejected rows older than storage.prune_rejected_days")
     p.add_argument("--greet-chats", action="store_true",
                    help="announce chat_id in newly-joined chats, then exit")
+    p.add_argument("--stats-json",
+                   help="write final run stats JSON to this path")
     return p
 
 
@@ -78,7 +73,7 @@ def main() -> int:
         )
         return 2
 
-    cfg = load_config(args.config)
+    cfg = load_runtime_config(args.config)
     logging.basicConfig(
         level=(cfg.get("logging") or {}).get("level", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -96,15 +91,19 @@ def main() -> int:
     storage_cfg = cfg.get("storage") or {}
     with SeenStore(storage_cfg.get("db_path", "./data/seen.db")) as store:
         repo = ChatConfigRepo(store)
+        webhook_enabled = runtime_has_webhook(cfg)
 
         # 1) Greet newly-joined chats + auto-bootstrap chat_configs rows.
-        if not args.dry_run or args.greet_chats:
-            _greet_new_chats(bot_token, store, repo, log)
+        dashboard_url: Optional[str] = (
+            (cfg.get("notifications") or {}).get("dashboard_url") or None
+        )
+        if not webhook_enabled and (not args.dry_run or args.greet_chats):
+            _greet_new_chats(bot_token, store, repo, log, dashboard_url=dashboard_url)
         if args.greet_chats:
             return 0
 
         # 2) Process pending Telegram commands (writes chat_configs overrides).
-        if not args.dry_run:
+        if not webhook_enabled and not args.dry_run:
             handled = CommandRouter(bot_token, repo, cfg).process_pending()
             if handled:
                 log.info("commands: processed %d update(s)", handled)
@@ -116,6 +115,7 @@ def main() -> int:
         chats = [c for c in repo.list_enabled() if not c.override.paused]
         if not chats:
             log.info("no active chats — set telegram.chat_id in config.yml or add the bot to a group")
+            _write_stats_json(args.stats_json, {"seen": 0, "already_seen": 0, "rejected": 0, "matched": 0, "cross_dup": 0, "sent": 0})
             return 0
 
         contexts = [
@@ -124,6 +124,7 @@ def main() -> int:
         stats = MultiChatPipeline(contexts, store, repo, dry_run=args.dry_run).run()
 
     log.info("done: %s", stats.as_dict())
+    _write_stats_json(args.stats_json, stats.as_dict())
     return 0
 
 
@@ -168,6 +169,7 @@ def _greet_new_chats(
     store: SeenStore,
     repo: ChatConfigRepo,
     log: logging.Logger,
+    dashboard_url: Optional[str] = None,
 ) -> None:
     """Post chat_id back to freshly-joined chats + register them in ``chat_configs``.
 
@@ -188,7 +190,7 @@ def _greet_new_chats(
         cid = c["id"]
         if store.is_greeted(cid):
             continue
-        if send_greeting(bot_token, cid, c["title"]):
+        if send_greeting(bot_token, cid, c["title"], dashboard_url=dashboard_url):
             store.record_greeted(cid, c["title"])
             _register_chat(cid, c["title"], repo, log)
             log.info("greet: announced chat_id=%s (%s)", cid, c["title"])
@@ -202,14 +204,12 @@ def _register_chat(chat_id, title, repo: ChatConfigRepo, log: logging.Logger) ->
     users adding the bot expect fresh matches going forward, not the
     archive. Idempotent: no-op if the chat is already registered.
     """
-    if repo.get(chat_id):
-        return
-    repo.upsert(chat_id, title, ChatOverride(), enabled=True)
-    n = repo.backfill_emissions_from_seen(chat_id)
-    log.info(
-        "registered chat_id=%s (%s) + backfilled %d historical emissions",
-        chat_id, title, n,
-    )
+    n = repo.register_chat(chat_id, title)
+    if n:
+        log.info(
+            "registered chat_id=%s (%s) + backfilled %d historical emissions",
+            chat_id, title, n,
+        )
 
 
 def _bootstrap_from_yaml_if_empty(cfg: dict, repo: ChatConfigRepo, log: logging.Logger) -> None:
@@ -258,6 +258,14 @@ def _bootstrap_from_yaml_if_empty(cfg: dict, repo: ChatConfigRepo, log: logging.
         "fallback: chat_id=%s reactivated from YAML (%s)",
         chat_id, ", ".join(changed) or "already active",
     )
+
+
+def _write_stats_json(path: Optional[str], stats: dict) -> None:
+    if not path:
+        return
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(stats, ensure_ascii=False, sort_keys=True), encoding="utf-8")
 
 
 if __name__ == "__main__":

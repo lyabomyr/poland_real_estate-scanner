@@ -1,7 +1,7 @@
 [project]
 name = "poland-real-estate-scanner"
 version = "0.1.0"
-description = "Scans Otodom, OLX, and listaprzetargow.pl for Kraków apartments and alerts to Telegram."
+description = "Scans Kraków apartment listings, scores them, and delivers matches to Telegram."
 authors = [
     { name = "Lubomyr Kachko", email = "lubomyr.kachko@stechinno.com" }
 ]
