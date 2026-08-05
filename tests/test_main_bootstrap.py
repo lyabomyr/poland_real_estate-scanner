@@ -15,7 +15,7 @@ class BootstrapTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.tempdir.name) / "seen.db"
-        self.store = SeenStore(str(self.db_path))
+        self.store = SeenStore(local_path=str(self.db_path))
         self.repo = ChatConfigRepo(self.store)
         self.log = logging.getLogger("test-bootstrap")
         self.cfg = load_yaml_config("config.example.yml")

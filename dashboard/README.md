@@ -16,15 +16,15 @@ dashboard/
 
 ```bash
 make install
-TURSO_URL=libsql://…turso.io \
-TURSO_AUTH_TOKEN=eyJhbGciOi… \
-  make dashboard
+cp ../.env.example ../.env   # fill in TURSO_URL + TURSO_AUTH_TOKEN
+make dashboard
 ```
 
 Opens on `http://localhost:8501`.
 
-Without the two `TURSO_*` vars set, `db.py` falls back to a local
-`data/seen.db` — same as the scanner.
+Turso is required — there is no local-database fallback. Without credentials
+the app renders a "Not configured" screen with the fix, rather than quietly
+showing an empty market.
 
 ## Streamlit Community Cloud (free hosting)
 

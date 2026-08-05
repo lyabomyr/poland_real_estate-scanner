@@ -148,7 +148,11 @@ scoring:
     - "wysoki parter"                           # mezzanine — poor natural light
 
 storage:
-  db_path: ./data/seen.db
+  # State always lives in Turso — set TURSO_URL and TURSO_AUTH_TOKEN in the
+  # environment (repo secrets on GitHub, App settings on Streamlit, a local
+  # .env for development). There is deliberately no local-SQLite fallback:
+  # it used to make an unconfigured dashboard look like an empty market.
+  #
   # Rejected rows older than this get archived to CSV and deleted from the DB
   # when you run `make prune` (or --prune, or the monthly prune workflow).
   # Matched / duplicate rows are never touched — they're the ML dataset.

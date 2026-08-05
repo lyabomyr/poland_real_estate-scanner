@@ -1,11 +1,19 @@
-"""SQLite / Turso-backed dedup + archive store, keyed by ``<source>:<id>``.
+"""Turso-backed dedup + archive store, keyed by ``<source>:<id>``.
 
-Backend selection
------------------
-Set ``TURSO_URL`` **and** ``TURSO_AUTH_TOKEN`` in the environment to use
-Turso (hosted libSQL). If either is missing we fall back to a local SQLite
-file at ``storage.db_path``. Local dev typically leaves both unset so it
-doesn't burn cloud reads while iterating.
+Backend
+-------
+**Turso is required.** ``TURSO_URL`` and ``TURSO_AUTH_TOKEN`` must be set;
+a missing credential raises :class:`MissingCredentialsError` rather than
+silently opening an empty local file.
+
+That fallback used to exist and caused real confusion: the dashboard would
+connect to a blank local database and look exactly like "the scanner never
+found anything". One backend means local dev, GitHub Actions and the hosted
+dashboard always read the same rows.
+
+Tests are the one exception — they pass ``local_path=`` explicitly to get a
+throwaway SQLite file, so the suite stays fast and offline. That is an opt-in
+by construction, never a fallback.
 
 Design notes
 ------------
@@ -32,22 +40,39 @@ from typing import Iterator, Optional, Set
 from .models import Listing
 
 
-def _connect(path: str, timeout: int = 30):
-    """Return a DB connection: Turso over HTTP if creds in env, else local sqlite3.
+class MissingCredentialsError(RuntimeError):
+    """Raised when Turso credentials are absent and no local path was given."""
 
-    We deliberately use Turso's HTTP API rather than the native
-    ``libsql-experimental`` driver — see :mod:`scanner.turso_http` for why
-    (compiled Rust extension, no wheels for newer CPython, breaks hosted
-    deploys). For a remote DB it's the same network round trip anyway.
+
+_CREDENTIALS_HINT = (
+    "Turso credentials are required. Set TURSO_URL and TURSO_AUTH_TOKEN.\n"
+    "  local shell : export them, or put them in a .env file (see .env.example)\n"
+    "  GitHub      : repository secrets TURSO_URL / TURSO_AUTH_TOKEN\n"
+    "  Streamlit   : Manage app -> Settings -> Secrets\n"
+    "Get the values with:\n"
+    "  turso db show <db> --url\n"
+    "  turso db tokens create <db> --expiration none"
+)
+
+
+def _connect(local_path: Optional[str] = None, timeout: int = 30):
+    """Connect to Turso, or to an explicit local SQLite file (tests only).
+
+    We use Turso's HTTP API rather than the native ``libsql-experimental``
+    driver — see :mod:`scanner.turso_http` for why (compiled Rust extension,
+    no wheels for newer CPython, breaks hosted deploys). For a remote DB it's
+    the same network round trip anyway.
     """
-    url = os.environ.get("TURSO_URL")
-    token = os.environ.get("TURSO_AUTH_TOKEN")
+    url = (os.environ.get("TURSO_URL") or "").strip()
+    token = (os.environ.get("TURSO_AUTH_TOKEN") or "").strip()
     if url and token:
-        # Imported lazily so local-SQLite users don't pay for it.
+        # Imported lazily so a local-path caller doesn't pay for it.
         from .turso_http import TursoConnection
         return TursoConnection(url, token, timeout=timeout)
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    return sqlite3.connect(path)
+    if local_path:
+        Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+        return sqlite3.connect(local_path)
+    raise MissingCredentialsError(_CREDENTIALS_HINT)
 
 
 # Individual statements so this works on both sqlite3 (batches fine but we
@@ -140,8 +165,19 @@ _SCHEMA_STMTS = [
 
 
 class SeenStore:
-    def __init__(self, path: str, *, ensure_schema: bool = True, timeout: int = 30):
-        """Open the store.
+    def __init__(
+        self,
+        local_path: Optional[str] = None,
+        *,
+        ensure_schema: bool = True,
+        timeout: int = 30,
+    ):
+        """Open the store. Requires Turso credentials in the environment.
+
+        ``local_path`` is an escape hatch for tests: when Turso credentials
+        are absent, connect to that SQLite file instead of raising. Production
+        callers pass nothing, so a missing credential fails loudly instead of
+        quietly reading an empty local database.
 
         ``ensure_schema`` runs the DDL + migrations. That's 15 sequential
         round-trips against Turso — fine once per scan, but it made the
@@ -149,12 +185,12 @@ class SeenStore:
         scanner already owns. Read-mostly clients should pass
         ``ensure_schema=False``.
 
-        ``timeout`` is the per-request HTTP timeout for the Turso backend.
-        Interactive callers want this well below the default so a slow
-        database surfaces as an error instead of an endless spinner.
+        ``timeout`` is the per-request HTTP timeout. Interactive callers want
+        this well below the default so a slow database surfaces as an error
+        rather than an endless spinner.
         """
-        self.path = Path(path)
-        self.conn = _connect(str(self.path), timeout=timeout)
+        self.local_path = local_path
+        self.conn = _connect(local_path, timeout=timeout)
         if ensure_schema:
             for stmt in _SCHEMA_STMTS:
                 self.conn.execute(stmt)

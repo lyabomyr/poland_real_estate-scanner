@@ -94,7 +94,7 @@ def render_connection_status() -> bool:
             st.success("🟢 Connected to Turso")
             st.caption(backend.detail)
         else:
-            st.warning("🟡 Local SQLite (not connected)")
+            st.warning("🟡 Not configured")
             st.caption(backend.detail)
 
     if backend.error:
@@ -117,9 +117,11 @@ def render_connection_status() -> bool:
 
     if not backend.is_turso:
         st.warning(
-            "**Not connected to the shared database.** This dashboard is "
-            "reading an empty local SQLite file, so it can't show the "
-            "scanner's data or edit chat settings."
+            "**Not connected.** Turso credentials are missing, so there's "
+            f"nothing to read ({backend.detail}). There is no local-database "
+            "fallback — the scanner and this dashboard always share one "
+            "database, so an unconfigured dashboard can't be mistaken for an "
+            "empty market."
         )
         _render_secrets_help()
         return False
@@ -128,20 +130,29 @@ def render_connection_status() -> bool:
 
 
 def _render_secrets_help() -> None:
-    """Actionable, copy-pasteable fix for the most common deploy mistake."""
-    st.markdown(
-        "#### How to connect\n"
-        "In Streamlit Cloud open **Manage app → Settings → Secrets** and paste "
-        "the two values below, then **Reboot app**."
-    )
-    st.code(
-        'TURSO_URL = "libsql://<your-db>-<user>.turso.io"\n'
-        'TURSO_AUTH_TOKEN = "<token>"',
-        language="toml",
-    )
+    """Actionable fix, covering both the hosted and the local path."""
+    st.markdown("#### How to connect")
+
+    hosted, local = st.tabs(["Streamlit Cloud", "Running locally"])
+    with hosted:
+        st.markdown("**Manage app → Settings → Secrets**, then **Reboot app**:")
+        st.code(
+            'TURSO_URL = "libsql://<your-db>-<user>.turso.io"\n'
+            'TURSO_AUTH_TOKEN = "<token>"',
+            language="toml",
+        )
+    with local:
+        st.markdown("Copy `.env.example` to `.env` and fill it in:")
+        st.code(
+            "cp .env.example .env\n"
+            "# then edit .env and run:\n"
+            "make dashboard",
+            language="bash",
+        )
+
     st.caption(
-        "Get them with `turso db show <db> --url` and "
-        "`turso db tokens create <db> --expiration none`. "
-        "Use the same values as the repo's GitHub secrets so the dashboard and "
-        "the scanner share one database."
+        "Get the values with `turso db show <db> --url` and "
+        "`turso db tokens create <db> --expiration none`. Use the same values "
+        "as the repo's GitHub secrets so the dashboard and the scanner share "
+        "one database."
     )

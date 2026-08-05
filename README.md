@@ -9,8 +9,10 @@ pieces:
    editing.
 
 State lives in **Turso/libSQL**, reached over its HTTP API (no compiled
-driver — see [`scanner/turso_http.py`](scanner/turso_http.py)). Local
-development falls back to a plain SQLite file.
+driver — see [`scanner/turso_http.py`](scanner/turso_http.py)).
+`TURSO_URL` + `TURSO_AUTH_TOKEN` are **required everywhere** — there is no
+local-database fallback, so the scanner, the bot and the dashboard always
+read the same rows.
 
 > ⏱ **Bot replies take up to 15 minutes.** Commands are read by the scheduled
 > scan, not by an always-on server, so a message sent at 12:01 is answered by
@@ -200,6 +202,7 @@ installs. `make install` builds a local `.venv` from it.
 
 ```bash
 make install
+cp .env.example .env        # fill in TURSO_URL + TURSO_AUTH_TOKEN
 cp config.example.yml config.yml
 # fill telegram.bot_token if you want local polling / manual sends
 

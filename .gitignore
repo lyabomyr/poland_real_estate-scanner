@@ -14,7 +14,7 @@ config.yml
 # Only .env.vercel.example (placeholders only) is tracked.
 .env
 .env.*
-!.env.vercel.example
+!.env.example
 # Scanner writes run stats here (--stats-json); the workflow reads it in the
 # next step and it never needs to be committed.
 .tmp/

@@ -1,8 +1,15 @@
-"""Shared Turso / local-SQLite connection + query helpers for the Streamlit UI.
+"""Turso connection + query helpers for the Streamlit UI.
 
-Reads credentials from ``TURSO_URL`` + ``TURSO_AUTH_TOKEN`` — Streamlit
-Cloud injects them from *App settings → Secrets*. Locally, ``st.secrets``
-also picks them up if you drop a ``.streamlit/secrets.toml``.
+Credentials come from ``TURSO_URL`` + ``TURSO_AUTH_TOKEN``, resolved in this
+order:
+
+1. real environment variables (Streamlit Cloud injects its Secrets this way)
+2. ``.streamlit/secrets.toml`` — only read when the file actually exists
+3. a project-root ``.env`` — the local development path
+
+There is no local-SQLite fallback. It used to make an unconfigured dashboard
+render as an empty market, which read as "the scanner found nothing" instead
+of "you are not connected".
 """
 
 from __future__ import annotations
@@ -24,8 +31,11 @@ if str(_ROOT) not in sys.path:
 
 from scanner.chat_config import ChatOverride, EffectiveConfig  # noqa: E402
 from scanner.chat_repo import ChatConfigRepo  # noqa: E402
+from scanner.env import load_dotenv  # noqa: E402
 from scanner.runtime_config import load_runtime_config  # noqa: E402
-from scanner.storage import SeenStore  # noqa: E402
+from scanner.storage import MissingCredentialsError, SeenStore  # noqa: E402
+
+_WANTED_SECRETS = ("TURSO_URL", "TURSO_AUTH_TOKEN")
 
 
 @st.cache_data(ttl=300)
@@ -49,25 +59,36 @@ def effective_config(override: ChatOverride) -> EffectiveConfig:
     return EffectiveConfig(baseline=load_baseline_config(), override=override)
 
 
-def _resolve_secrets() -> None:
-    """Copy Streamlit secrets into env so `SeenStore` picks Turso automatically.
+def _secrets_file_exists() -> bool:
+    """Whether Streamlit has a secrets.toml to read.
 
-    ``st.secrets`` is lazy: the attribute access is cheap, but *reading* from
-    it raises ``StreamlitSecretNotFoundError`` when no secrets.toml exists.
-    So the whole lookup has to sit inside the try, and we skip it entirely
-    when the env already carries both values (local dev with exported vars,
-    or a plain SQLite run).
+    Checked *before* touching ``st.secrets`` on purpose: reading it with no
+    file present raises, and Streamlit surfaces that as a red error box in the
+    UI even when the caller catches it. Probing the paths ourselves keeps a
+    normal local run clean.
     """
-    wanted = ("TURSO_URL", "TURSO_AUTH_TOKEN")
-    if all(os.environ.get(key) for key in wanted):
+    candidates = (
+        Path.home() / ".streamlit" / "secrets.toml",
+        _ROOT / ".streamlit" / "secrets.toml",
+    )
+    return any(p.exists() for p in candidates)
+
+
+def _resolve_secrets() -> None:
+    """Populate TURSO_* in the environment from whichever source has them."""
+    if all(os.environ.get(key) for key in _WANTED_SECRETS):
         return
-    try:
-        for key in wanted:
-            if key not in os.environ and key in st.secrets:
-                os.environ[key] = str(st.secrets[key])
-    except Exception:
-        # No secrets configured — fall back to the local SQLite file.
-        return
+
+    if _secrets_file_exists():
+        try:
+            for key in _WANTED_SECRETS:
+                if not os.environ.get(key) and key in st.secrets:
+                    os.environ[key] = str(st.secrets[key])
+        except Exception:
+            pass
+
+    if not all(os.environ.get(key) for key in _WANTED_SECRETS):
+        load_dotenv()
 
 
 @dataclass
@@ -79,9 +100,9 @@ class Backend:
     local SQLite file, and the app looks like "the scanner never ran" instead
     of "the dashboard isn't connected".
     """
-    kind: str                      # "turso" | "sqlite"
-    detail: str                    # host, or local file path
-    error: Optional[str] = None    # set when Turso creds exist but fail
+    kind: str                      # "turso" | "unconfigured"
+    detail: str                    # host, or a short reason
+    error: Optional[str] = None    # set when creds exist but the connect fails
     schema_missing: bool = False   # connected, but the scanner never ran
 
     @property
@@ -103,11 +124,7 @@ def get_store() -> SeenStore:
     turns a multi-second cold start into a single connect.
     """
     _resolve_secrets()
-    return SeenStore(
-        "./data/seen.db",
-        ensure_schema=False,
-        timeout=_HTTP_TIMEOUT_SECONDS,
-    )
+    return SeenStore(ensure_schema=False, timeout=_HTTP_TIMEOUT_SECONDS)
 
 
 @st.cache_data(ttl=30)
@@ -116,12 +133,15 @@ def backend_info() -> Backend:
     _resolve_secrets()
     url = os.environ.get("TURSO_URL")
     if not (url and os.environ.get("TURSO_AUTH_TOKEN")):
-        return Backend(kind="sqlite", detail="./data/seen.db")
+        missing = [k for k in _WANTED_SECRETS if not os.environ.get(k)]
+        return Backend(kind="unconfigured", detail=f"missing {', '.join(missing)}")
 
     host = url.split("://", 1)[-1]
     try:
         store = get_store()
         store.conn.execute("SELECT 1").fetchone()
+    except MissingCredentialsError as exc:
+        return Backend(kind="unconfigured", detail=str(exc).splitlines()[0])
     except Exception as exc:  # wrong token, revoked DB, network…
         return Backend(kind="turso", detail=host, error=str(exc))
     # We skip the DDL, so an empty database is a state we have to name

@@ -19,11 +19,12 @@ from pathlib import Path
 from typing import Optional
 
 from scanner.chat_repo import ChatConfigRepo
+from scanner.env import load_dotenv
 from scanner.commands import CommandRouter
 from scanner.pipeline import MultiChatPipeline, build_chat_context
 from scanner.registry import SOURCE_REGISTRY
 from scanner.runtime_config import load_runtime_config
-from scanner.storage import SeenStore
+from scanner.storage import MissingCredentialsError, SeenStore
 from scanner.telegram import (
     chat_dashboard_url,
     default_reply_keyboard,
@@ -54,6 +55,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    # Before anything touches TURSO_* / TG_* — real env vars still win.
+    load_dotenv()
     args = _build_arg_parser().parse_args()
 
     if not Path(args.config).exists():
@@ -79,8 +82,12 @@ def main() -> int:
     if args.prune:
         return _handle_prune(cfg, log)
 
-    storage_cfg = cfg.get("storage") or {}
-    with SeenStore(storage_cfg.get("db_path", "./data/seen.db")) as store:
+    try:
+        store_cm = SeenStore()
+    except MissingCredentialsError as e:
+        print(f"\n{e}\n", file=sys.stderr)
+        return 2
+    with store_cm as store:
         repo = ChatConfigRepo(store)
 
         # 1) Greet newly-joined chats + auto-register them as scan targets.
@@ -126,7 +133,7 @@ def _handle_prune(cfg: dict, log: logging.Logger) -> int:
     storage_cfg = cfg.get("storage") or {}
     days = int(storage_cfg.get("prune_rejected_days", 90))
     archive_dir = Path(storage_cfg.get("archive_dir", "./datasets"))
-    with SeenStore(storage_cfg.get("db_path", "./data/seen.db")) as store:
+    with SeenStore() as store:
         n = store.prune_rejected(older_than_days=days, export_dir=archive_dir)
     log.info("pruned %d rejected rows older than %d days (archive: %s)", n, days, archive_dir)
     return 0
