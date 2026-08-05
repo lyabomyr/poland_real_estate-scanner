@@ -27,6 +27,9 @@ chats: config  ## list chats the bot has recently seen (for picking chat_id)
 prune: config  ## archive + delete rejected rows older than storage.prune_rejected_days
 	poetry run python main.py --prune
 
+vercel-env:  ## build .env.vercel (prompts for secrets; import it into Vercel)
+	poetry run python scripts/make_vercel_env.py
+
 lint:  ## static-check for unused imports / undefined names
 	poetry run pyflakes scanner/ main.py api scripts tests
 
