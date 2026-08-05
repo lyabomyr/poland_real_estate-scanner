@@ -123,10 +123,19 @@ _SCHEMA_STMTS = [
     # never be looked at. Keyed by URL rather than by source name because
     # chats can point the same source at different cities or price bands;
     # each of those deserves its own first sweep.
+    #
+    # `filters` is a fingerprint of the filter settings in force when the
+    # sweep ran. Relax a rule — delete a phrase from reject_keywords, raise
+    # max_price — and the fingerprint changes, which retires the sweep and
+    # makes the next run walk every page again. Without it, editing the YAML
+    # would only affect listings still sitting on pages 1-2; everything
+    # rejected deeper in the catalogue would stay rejected forever, because a
+    # steady-state run never looks that far.
     """
     CREATE TABLE IF NOT EXISTS swept_urls (
         url          TEXT PRIMARY KEY,
-        completed_at TEXT NOT NULL DEFAULT (datetime('now'))
+        completed_at TEXT NOT NULL DEFAULT (datetime('now')),
+        filters      TEXT
     )
     """,
     # Per-chat configuration overrides. Every enabled chat receives matches
@@ -262,28 +271,39 @@ class SeenStore:
         if "emitted_price" not in emission_cols:
             self.conn.execute("ALTER TABLE chat_emissions ADD COLUMN emitted_price INTEGER")
 
+        swept_cols = {
+            r[1] for r in self.conn.execute("PRAGMA table_info(swept_urls)").fetchall()
+        }
+        if swept_cols and "filters" not in swept_cols:
+            self.conn.execute("ALTER TABLE swept_urls ADD COLUMN filters TEXT")
+
     def has(self, key: str) -> bool:
         cur = self.conn.execute("SELECT 1 FROM seen WHERE key = ? LIMIT 1", (key,))
         return cur.fetchone() is not None
 
     # ── swept_urls ─────────────────────────────────────────────────────
 
-    def is_swept(self, url: str) -> bool:
-        """Has this search URL had its full back-catalogue walked already?"""
+    def is_swept(self, url: str, filters: str = "") -> bool:
+        """Has this URL been fully walked under *these* filter settings?
+
+        A sweep recorded under different filters does not count: the listings
+        it rejected were judged by rules that no longer apply, and they sit on
+        pages a steady-state run never reaches. Returning False here is what
+        makes an edit to ``reject_keywords`` reach the whole back-catalogue.
+        """
         cur = self.conn.execute(
-            "SELECT 1 FROM swept_urls WHERE url = ? LIMIT 1", (url,)
+            "SELECT 1 FROM swept_urls WHERE url = ? AND COALESCE(filters, '') = ? LIMIT 1",
+            (url, filters),
         )
         return cur.fetchone() is not None
 
-    def record_swept(self, url: str) -> None:
-        """Mark a URL as fully swept.
-
-        Only call this once the sweep's listings have actually been delivered.
-        Recording it earlier would mean a run killed mid-delivery never
-        retries the deep pages, silently stranding everything it found there.
-        """
+    def record_swept(self, url: str, filters: str = "") -> None:
+        """Mark a URL as fully swept under the given filter fingerprint."""
         self.conn.execute(
-            "INSERT OR IGNORE INTO swept_urls (url) VALUES (?)", (url,)
+            "INSERT INTO swept_urls (url, filters) VALUES (?, ?) "
+            "ON CONFLICT(url) DO UPDATE SET filters = excluded.filters, "
+            "completed_at = datetime('now')",
+            (url, filters),
         )
         self.conn.commit()
 
@@ -424,6 +444,26 @@ class SeenStore:
             (key, None if old_price is None else int(old_price), int(new_price)),
         )
         self.conn.commit()
+
+    def promote_rejected(self, key: str, fuzzy_key: Optional[str] = None) -> bool:
+        """Flip a stored ``rejected`` row to ``matched``. True if it changed.
+
+        This is what makes relaxing a filter actually work. Drop a phrase from
+        ``reject_keywords`` and the listing passes on the next scan — but its
+        stored row still said ``rejected``, so it stayed invisible to the
+        dashboard and to the delivery backlog, which only reads ``matched``.
+        The listing was accepted and then silently dropped anyway.
+
+        Scoped to ``status = 'rejected'`` so it can never demote or re-touch a
+        row that is already matched.
+        """
+        cur = self.conn.execute(
+            "UPDATE seen SET status = 'matched', reject_reason = NULL, "
+            "fuzzy_key = COALESCE(?, fuzzy_key) WHERE key = ? AND status = 'rejected'",
+            (fuzzy_key, key),
+        )
+        self.conn.commit()
+        return bool(cur.rowcount and cur.rowcount > 0)
 
     def update_score(self, key: str, score) -> None:
         """Persist a listing's :class:`~scanner.models.DealScore`.

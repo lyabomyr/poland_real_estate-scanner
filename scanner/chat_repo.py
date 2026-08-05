@@ -11,7 +11,35 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from .chat_config import ChatOverride
+from .models import DealScore, Listing
 from .storage import SeenStore
+
+
+def _listing_from_row(row) -> Listing:
+    """Rebuild a :class:`Listing` from a ``seen`` row.
+
+    Only the fields a notification renders. The score was computed and
+    persisted when the listing was first matched, so a backlog message shows
+    the same number the listing has on the dashboard.
+    """
+    (source, listing_id, url, title, price, area, location, description,
+     image_url, score, score_reasons, fuzzy_key) = row
+    listing = Listing(
+        source=source,
+        id=listing_id,
+        url=url,
+        title=title,
+        price=price,
+        area=area,
+        location=location,
+        description=description,
+        image_url=image_url,
+    )
+    if score is not None:
+        # SeenStore.update_score joins them with ", " — mirror that exactly.
+        reasons = [r for r in (score_reasons or "").split(", ") if r]
+        listing.score = DealScore(value=int(score), reasons=reasons)
+    return listing
 
 
 @dataclass
@@ -171,6 +199,38 @@ class ChatConfigRepo:
             (str(chat_id),),
         )
         return {r[0] for r in cur.fetchall() if r[0]}
+
+    def undelivered(self, chat_id, limit: int = 2000) -> List[Listing]:
+        """Matched listings this chat has never been sent, best score first.
+
+        This is the delivery backlog, and it exists because discovery and
+        delivery run at wildly different speeds. A first sweep finds ~1000
+        listings in six minutes; Telegram accepts about twenty messages a
+        minute into a group, so delivering them takes over half an hour and
+        the scheduled run is killed long before it finishes.
+
+        Reading the backlog from the database instead of from "what this scan
+        happened to see" means an interrupted run costs nothing: the next run
+        picks up exactly where it stopped, without re-walking deep pages that
+        the portal only surfaces on a full sweep.
+        """
+        cur = self.store.conn.execute(
+            """
+            SELECT s.source, s.listing_id, s.url, s.title, s.price, s.area,
+                   s.location, s.description, s.image_url, s.score,
+                   s.score_reasons, s.fuzzy_key
+            FROM seen s
+            WHERE s.status = 'matched'
+              AND NOT EXISTS (
+                  SELECT 1 FROM chat_emissions e
+                  WHERE e.chat_id = ? AND e.listing_key = s.key
+              )
+            ORDER BY s.score DESC, s.price ASC
+            LIMIT ?
+            """,
+            (str(chat_id), int(limit)),
+        )
+        return [_listing_from_row(r) for r in cur.fetchall()]
 
     # ── command deduplication (never process the same update twice) ───
 

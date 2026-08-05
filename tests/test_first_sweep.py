@@ -186,12 +186,14 @@ class _Store:
     """Minimal SeenStore stand-in for the sweep bookkeeping."""
 
     def __init__(self, swept=()):
+        # A sweep is recorded per (url, filter fingerprint) — changing the
+        # filters retires it so the back-catalogue is re-judged.
         self.swept = set(swept)
 
-    def is_swept(self, url):
+    def is_swept(self, url, filters=""):
         return url in self.swept
 
-    def record_swept(self, url):
+    def record_swept(self, url, filters=""):
         self.swept.add(url)
 
     # everything the pipeline touches during a scan
@@ -204,6 +206,9 @@ class _Store:
     def stored_price(self, key):
         return None
 
+    def promote_rejected(self, key, fuzzy_key=None):
+        return False
+
 
 class _Repo:
     def emitted_price(self, chat_id, key):
@@ -211,6 +216,9 @@ class _Repo:
 
     def has_emitted(self, chat_id, key):
         return False
+
+    def undelivered(self, chat_id, limit=2000):
+        return []
 
 
 class FirstSweepTests(unittest.TestCase):

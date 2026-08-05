@@ -5,6 +5,7 @@ and later run ``sqlite3 data/seen.db 'SELECT reject_reason, COUNT(*) ...'`` to
 audit which filter is doing most of the work.
 """
 
+import hashlib
 import re
 from typing import Iterable, Optional, Tuple
 
@@ -51,6 +52,28 @@ class ListingFilter:
             min_build_year=ec.min_build_year(),
             reject_keywords=ec.reject_keywords(),
         )
+
+    def fingerprint(self) -> str:
+        """Short stable hash of everything :meth:`accepts` decides on.
+
+        Used to retire a completed sweep when the rules change. Relax a rule
+        and the fingerprint moves, so the next run re-walks the whole
+        back-catalogue and re-judges listings it had rejected — which is what
+        makes deleting a phrase from ``reject_keywords`` reach listings buried
+        on page 14, not just the two pages a routine run looks at.
+
+        Only *loosening* really needs this, but distinguishing loosening from
+        tightening is not worth the complexity: a re-sweep is a few minutes
+        and yields nothing new when the rules got stricter.
+        """
+        payload = "|".join([
+            f"{self.min_area:g}",
+            "-" if self.max_area is None else f"{self.max_area:g}",
+            str(self.max_price),
+            str(self.min_build_year or "-"),
+            ",".join(sorted(self.reject_keywords)),
+        ])
+        return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 
     def accepts(self, l: Listing) -> Tuple[bool, str]:
         """Return ``(True, "")`` if the listing passes, else ``(False, reason)``.

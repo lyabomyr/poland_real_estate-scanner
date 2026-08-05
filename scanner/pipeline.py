@@ -77,6 +77,10 @@ class RunStats:
     #: because no bot token is configured). Counted separately from `sent`
     #: so a run that finds matches but delivers none can't read as success.
     send_failed: int = 0
+    #: Previously-rejected listings that pass now because a filter was
+    #: relaxed. Visible so "I deleted a reject keyword" has an observable
+    #: effect in the logs rather than being taken on faith.
+    promoted: int = 0
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -127,6 +131,14 @@ class MultiChatPipeline:
             matched = self._cross_source_dedup(ctx, matched)
             if ctx.scorer:
                 self._score(ctx, matched)
+            # The scan's job ends here: everything it found is now stored and
+            # scored, so a URL is fully swept regardless of what gets sent
+            # below. Delivery is driven off the database from this point on,
+            # which is what makes an interrupted run cheap to resume.
+            if not self.dry_run:
+                for url in swept:
+                    self.store.record_swept(url, ctx.filter.fingerprint())
+                matched = self._delivery_backlog(ctx, matched)
             before_sent = self.stats.sent
             before_failed = self.stats.send_failed
             self._emit(ctx, matched)
@@ -142,14 +154,41 @@ class MultiChatPipeline:
                     "unrecorded and will be retried next run",
                     ctx.chat_id, failed,
                 )
-            # Only now, with delivery done, is the first sweep of these URLs
-            # safe to write off. A run killed mid-delivery leaves them
-            # unmarked and sweeps them again, re-finding whatever was
-            # stranded on the deep pages — chat_emissions stops duplicates.
-            if not self.dry_run:
-                for url in swept:
-                    self.store.record_swept(url)
         return self.stats
+
+    def _delivery_backlog(
+        self, ctx: ChatContext, matched: Dict[str, List[Listing]]
+    ) -> Dict[str, List[Listing]]:
+        """Replace this run's matches with everything this chat is still owed.
+
+        Discovery and delivery run at very different speeds. A first sweep
+        finds ~1000 listings in six minutes; Telegram takes about twenty
+        messages a minute into a group, so sending them takes over half an
+        hour and the scheduled run is killed long before it finishes. Driving
+        delivery from "what this scan saw" then stranded everything the killed
+        run never reached — 647 listings sat matched-but-unsent, and because
+        later runs only walk the first two pages, they were never seen again.
+
+        Reading the backlog from the database fixes that by construction:
+        whatever is left is picked up by the next run, in score order.
+
+        Price changes are the one thing not in here — those listings *have*
+        been emitted, so they are carried over from the scan.
+        """
+        price_changes = [
+            l for listings in matched.values() for l in listings
+            if l.previous_price is not None
+        ]
+        backlog = self.repo.undelivered(ctx.chat_id)
+        if backlog:
+            log.info(
+                "[%s] delivery backlog: %d listing(s) matched but never sent",
+                ctx.chat_id, len(backlog),
+            )
+        out: Dict[str, List[Listing]] = {}
+        for listing in price_changes + backlog:
+            out.setdefault(listing.source, []).append(listing)
+        return out
 
     # ── phase 1 ────────────────────────────────────────────────────────
 
@@ -169,19 +208,25 @@ class MultiChatPipeline:
         # impossible to trust — this is the line that shows a filter has
         # started eating everything.
         rejects: Counter = Counter()
+        fingerprint = ctx.filter.fingerprint()
         for src in ctx.sources:
-            first_sweep = bool(src.url) and not self.store.is_swept(src.url)
+            first_sweep = bool(src.url) and not self.store.is_swept(src.url, fingerprint)
             if first_sweep:
                 # Never seen this URL before — take the whole back-catalogue
                 # instead of just the newest page or two.
                 src.pages = 0
                 log.info(
-                    "[%s] %s: first sweep of this URL — scanning every page",
+                    "[%s] %s: no completed sweep for this URL under the "
+                    "current filters — scanning every page",
                     ctx.chat_id, src.name,
                 )
-            log.info("[%s] scanning %s", ctx.chat_id, src.name)
+            # Log the URL, not just the source name: it is the one thing you
+            # need to reproduce a scan in a browser, and it encodes the city
+            # and thresholds actually in effect for this chat.
+            log.info("[%s] scanning %s: %s", ctx.chat_id, src.name, src.url or "(no URL)")
             matched[src.name] = []
             before = (self.stats.seen, self.stats.rejected, self.stats.already_seen)
+            before_promoted = self.stats.promoted
             src_rejects: Counter = Counter()
             try:
                 for listing in src.scan():
@@ -205,6 +250,13 @@ class MultiChatPipeline:
                         ok, _ = ctx.filter.accepts(listing)
                         if not ok:
                             continue
+                        # It passes now but was stored as rejected — someone
+                        # relaxed a filter. Promote it, or it stays invisible
+                        # to the dashboard and to the delivery backlog.
+                        if not self.dry_run and self.store.promote_rejected(
+                            listing.dedup_key, listing.fuzzy_key
+                        ):
+                            self.stats.promoted += 1
                         # A re-seen listing whose price moved is news again —
                         # portals edit prices in place, keeping the same id, so
                         # without this a drop would be silently swallowed by the
@@ -248,6 +300,12 @@ class MultiChatPipeline:
                 log.warning(
                     "[%s] %s returned no listings at all — check the URL or the parser",
                     ctx.chat_id, src.name,
+                )
+            promoted = self.stats.promoted - before_promoted
+            if promoted:
+                log.info(
+                    "[%s] %s: %d previously-rejected listing(s) now pass — a "
+                    "filter was relaxed", ctx.chat_id, src.name, promoted,
                 )
             rejects.update(src_rejects)
 
