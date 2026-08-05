@@ -65,6 +65,9 @@ _SCHEMA_STMTS = [
         status        TEXT NOT NULL,          -- 'matched' | 'rejected' | 'duplicate'
         reject_reason TEXT,                   -- populated only for status='rejected'
         fuzzy_key     TEXT,                   -- cross-source dedup — see models.py
+        location      TEXT,                   -- free-form "street, district, city"
+        description   TEXT,                   -- short blurb, shown on dashboard cards
+        image_url     TEXT,                   -- thumbnail URL for dashboard cards
         score         INTEGER,                -- 0-100 DealScore, written after scoring
         score_reasons TEXT,                   -- comma-joined reason tags for the score
         first_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -161,6 +164,9 @@ class SeenStore:
             ("fuzzy_key", "ALTER TABLE seen ADD COLUMN fuzzy_key TEXT"),
             ("score", "ALTER TABLE seen ADD COLUMN score INTEGER"),
             ("score_reasons", "ALTER TABLE seen ADD COLUMN score_reasons TEXT"),
+            ("image_url", "ALTER TABLE seen ADD COLUMN image_url TEXT"),
+            ("location", "ALTER TABLE seen ADD COLUMN location TEXT"),
+            ("description", "ALTER TABLE seen ADD COLUMN description TEXT"),
         ):
             if column not in existing_cols:
                 self.conn.execute(ddl)
@@ -233,8 +239,8 @@ class SeenStore:
             """
             INSERT OR IGNORE INTO seen
                 (key, source, listing_id, url, title, price, area,
-                 status, reject_reason, fuzzy_key)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 status, reject_reason, fuzzy_key, image_url, location, description)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 listing.dedup_key,
@@ -247,6 +253,9 @@ class SeenStore:
                 status,
                 reject_reason,
                 fuzzy_key,
+                listing.image_url,
+                listing.location,
+                listing.description,
             ),
         )
         self.conn.commit()

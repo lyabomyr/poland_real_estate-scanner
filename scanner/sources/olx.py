@@ -65,6 +65,7 @@ def _card_to_listing(card) -> Optional[Listing]:
 
         return Listing(
             source="olx",
+            image_url=_pick_image(card),
             id=str(_id),
             url=url,
             title=title,
@@ -75,3 +76,12 @@ def _card_to_listing(card) -> Optional[Listing]:
     except Exception as e:
         log.debug("olx: card parse error: %s", e)
         return None
+
+
+def _pick_image(card) -> Optional[str]:
+    """First real photo in the card, skipping inline SVG placeholders."""
+    for img in card.find_all("img"):
+        src = img.get("src") or img.get("data-src") or ""
+        if src.startswith("http") and not src.endswith(".svg"):
+            return src
+    return None

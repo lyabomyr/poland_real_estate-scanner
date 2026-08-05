@@ -1,7 +1,9 @@
-"""Streamlit dashboard — main page: overview KPIs + score histogram.
+"""Overview page: what the scanner is finding, and the current best offers.
 
-Streamlit's file-based routing automatically picks up any ``pages/*.py``
-so navigation shows this page + everything under ``dashboard/pages/``.
+Everything is scoped by the Target picker — "All chats" for the whole store,
+or one chat for exactly what that chat was notified about. Chats with
+different price/area/city overrides legitimately see different markets, so a
+global-only view would be misleading.
 """
 
 from __future__ import annotations
@@ -10,112 +12,209 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from db import load_chats, load_emissions_joined, load_seen
-from ui import render_connection_status
+from ui import render_connection_status, target_picker
+from db import load_chats, load_listings_full, load_price_history
 
-st.set_page_config(
-    page_title="Kraków flats — scanner",
-    page_icon="🏢",
-    layout="wide",
-)
+st.set_page_config(page_title="Kraków flats — scanner", page_icon="🏢", layout="wide")
 
-st.title("🏢 Kraków flats — scanner")
+st.title("🏢 Flat scanner — overview")
 st.caption(
-    "Live read from Turso — the same database the scanner writes to. Numbers "
-    "update on every scan (\\*/15 min); cached in the UI for 60 s. Refresh to "
-    "re-fetch."
+    "Live read from Turso — the same database the scanner writes to. Updated "
+    "on every scan (\\*/15 min), cached in the UI for 60 s."
 )
 
-# Bail out early with an actionable message if we're not on the shared DB —
-# otherwise an unconfigured deploy renders as "the scanner never ran".
 if not render_connection_status():
     st.stop()
 
-seen = load_seen()
-if seen.empty:
+chat_id, chat_label = target_picker(load_chats())
+df = load_listings_full(chat_id)
+
+if df.empty:
     st.info(
-        "**Connected, but the database is empty.** No scan has stored anything "
-        "yet — trigger the **scan** workflow on GitHub Actions (or run "
-        "`make run` locally) and refresh."
+        f"Nothing delivered to **{chat_label}** yet."
+        if chat_id else
+        "No matched listings yet — trigger the **scan** workflow and refresh."
     )
     st.stop()
 
-matched = seen[seen["status"] == "matched"].copy()
-rejected = seen[seen["status"] == "rejected"]
-dupes = seen[seen["status"] == "duplicate"]
+# Derived once, reused by every panel below.
+df["ppm2"] = df.apply(
+    lambda r: (r["price"] / r["area"]) if r["price"] and r["area"] and r["area"] > 0 else None,
+    axis=1,
+)
+df["day"] = pd.to_datetime(df["first_seen_at"], errors="coerce").dt.date
 
-# ── KPIs ──────────────────────────────────────────────────────────────
+# ── KPI row ───────────────────────────────────────────────────────────
 
-col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Matched", len(matched))
-col2.metric("Rejected", len(rejected))
-col3.metric("Cross-source dupes", len(dupes))
-if not matched.empty:
-    matched["ppm2"] = matched.apply(
-        lambda r: (r["price"] / r["area"]) if r["price"] and r["area"] and r["area"] > 0 else None,
-        axis=1,
-    )
-    col4.metric("Median zł/m²", f"{int(matched['ppm2'].median()):,}".replace(",", " "))
-col5.metric("Chats registered", len(load_chats()))
+ppm2 = df["ppm2"].dropna()
+k1, k2, k3, k4, k5 = st.columns(5)
+k1.metric("Listings", len(df))
+if not ppm2.empty:
+    k2.metric("Median zł/m²", f"{int(ppm2.median()):,}".replace(",", " "))
+    k3.metric("Cheapest zł/m²", f"{int(ppm2.min()):,}".replace(",", " "))
+    k4.metric("Priciest zł/m²", f"{int(ppm2.max()):,}".replace(",", " "))
+if df["score"].notna().any():
+    k5.metric("Best score", int(df["score"].max()))
 
 st.divider()
 
-# ── Source breakdown ──────────────────────────────────────────────────
+# ── Top 3 offers ──────────────────────────────────────────────────────
 
-left, right = st.columns([1, 1])
+st.subheader("🏆 Top 3 right now")
+st.caption("Ranked by deal score, then by price. Images come straight from the portal.")
+
+top = df[df["score"].notna()].head(3) if df["score"].notna().any() else df.head(3)
+if top.empty:
+    st.info("No listings to rank yet.")
+else:
+    for col, (_, row) in zip(st.columns(len(top)), top.iterrows()):
+        with col:
+            if row.get("image_url"):
+                st.image(row["image_url"], use_container_width=True)
+            else:
+                st.markdown(
+                    "<div style='height:150px;display:flex;align-items:center;"
+                    "justify-content:center;background:#26292f;border-radius:8px;"
+                    "color:#888'>no photo</div>",
+                    unsafe_allow_html=True,
+                )
+            score = int(row["score"]) if pd.notna(row.get("score")) else None
+            st.markdown(f"### {'★ ' + str(score) if score is not None else '—'}")
+            st.markdown(f"**{(row['title'] or '(no title)')[:90]}**")
+
+            bits = []
+            if pd.notna(row["price"]):
+                bits.append(f"**{int(row['price']):,}".replace(",", " ") + " zł**")
+            if pd.notna(row["area"]):
+                bits.append(f"{row['area']:g} m²")
+            if pd.notna(row["ppm2"]):
+                bits.append(f"{int(row['ppm2']):,}".replace(",", " ") + " zł/m²")
+            st.markdown(" · ".join(bits))
+
+            if row.get("location"):
+                st.caption(f"📍 {row['location']}")
+            if row.get("score_reasons"):
+                st.caption(f"why: {row['score_reasons']}")
+            if row.get("description"):
+                st.caption(str(row["description"])[:160])
+            st.markdown(f"[Open on {row['source']} ↗]({row['url']})")
+
+st.divider()
+
+# ── Time + location ───────────────────────────────────────────────────
+
+left, right = st.columns(2)
 
 with left:
-    st.subheader("Matches by source")
-    by_src = matched.groupby("source").size().reset_index(name="count").sort_values("count", ascending=False)
-    fig = px.bar(by_src, x="source", y="count", text="count")
-    fig.update_layout(height=320, showlegend=False, xaxis_title=None, yaxis_title=None)
-    st.plotly_chart(fig, use_container_width=True)
+    st.subheader("New listings per day")
+    per_day = df.dropna(subset=["day"]).groupby("day").size().reset_index(name="count")
+    if per_day.empty:
+        st.write("_(no dated listings)_")
+    else:
+        fig = px.bar(per_day, x="day", y="count", text="count")
+        fig.update_layout(height=330, xaxis_title=None, yaxis_title=None, bargap=0.25)
+        st.plotly_chart(fig, use_container_width=True)
 
 with right:
-    st.subheader("Reject reasons")
-    if rejected.empty:
-        st.write("_(nothing rejected yet)_")
+    st.subheader("Where they are")
+    st.caption("Grouped by district — the second part of the listing's address.")
+    # "Sołtysowska, Czyżyny, Kraków, małopolskie" -> "Czyżyny". Falls back to
+    # the first token when a listing only carries one.
+    def _district(loc: str | None) -> str | None:
+        if not loc:
+            return None
+        parts = [p.strip() for p in str(loc).split(",") if p.strip()]
+        return (parts[1] if len(parts) > 1 else parts[0]) if parts else None
+
+    districts = df["location"].map(_district).dropna()
+    if districts.empty:
+        st.info("No location data stored yet — it's written by the next scan.")
     else:
-        rr = rejected["reject_reason"].fillna("(unspecified)").value_counts().head(15)
-        rr_df = pd.DataFrame({"reason": rr.index, "count": rr.values})
-        fig = px.bar(rr_df, x="count", y="reason", orientation="h")
-        fig.update_layout(height=320, yaxis={"categoryorder": "total ascending"}, xaxis_title=None, yaxis_title=None)
+        counts = districts.value_counts().head(12).reset_index()
+        counts.columns = ["district", "count"]
+        fig = px.bar(counts, x="count", y="district", orientation="h", text="count")
+        fig.update_layout(
+            height=330, yaxis={"categoryorder": "total ascending"},
+            xaxis_title=None, yaxis_title=None,
+        )
         st.plotly_chart(fig, use_container_width=True)
 
-# ── Time trend + price/m² distribution ────────────────────────────────
-
 st.divider()
-left2, right2 = st.columns([1, 1])
 
-with left2:
-    st.subheader("New matches per day")
-    ts = matched.copy()
-    ts["day"] = pd.to_datetime(ts["first_seen_at"]).dt.date
-    per_day = ts.groupby("day").size().reset_index(name="count")
-    fig = px.line(per_day, x="day", y="count", markers=True)
-    fig.update_layout(height=300, xaxis_title=None, yaxis_title=None)
-    st.plotly_chart(fig, use_container_width=True)
+# ── Price per m² ──────────────────────────────────────────────────────
 
-with right2:
-    st.subheader("Price / m² distribution")
-    if "ppm2" in matched.columns and matched["ppm2"].notna().any():
-        fig = px.histogram(matched.dropna(subset=["ppm2"]), x="ppm2", nbins=30)
-        fig.update_layout(height=300, xaxis_title="zł / m²", yaxis_title=None, bargap=0.02)
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.write("_(not enough listings with area yet)_")
-
-# ── Emissions by chat ─────────────────────────────────────────────────
-
-st.divider()
-st.subheader("Delivered per chat (last 30 days)")
-em = load_emissions_joined()
-if em.empty:
-    st.write("_(no messages delivered yet)_")
+st.subheader("Price per m²")
+if ppm2.empty:
+    st.info("Not enough listings with both price and area yet.")
 else:
-    recent = em[pd.to_datetime(em["sent_at"]) >= (pd.Timestamp.utcnow() - pd.Timedelta(days=30))]
-    by_chat = recent.groupby("chat_id").size().reset_index(name="delivered")
-    chats = load_chats()[["chat_id", "title"]]
-    merged = by_chat.merge(chats, on="chat_id", how="left")
-    merged = merged.rename(columns={"title": "chat_title"})[["chat_id", "chat_title", "delivered"]]
-    st.dataframe(merged, use_container_width=True, hide_index=True)
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        fig = px.histogram(df.dropna(subset=["ppm2"]), x="ppm2", nbins=30)
+        fig.add_vline(
+            x=ppm2.median(), line_dash="dash",
+            annotation_text="median", annotation_position="top",
+        )
+        fig.update_layout(height=330, xaxis_title="zł / m²", yaxis_title=None, bargap=0.02)
+        st.plotly_chart(fig, use_container_width=True)
+    with c2:
+        st.markdown("**Distribution**")
+        st.dataframe(
+            pd.DataFrame({
+                "metric": ["count", "min", "25%", "median", "75%", "max", "mean"],
+                "zł/m²": [
+                    int(ppm2.count()), int(ppm2.min()), int(ppm2.quantile(.25)),
+                    int(ppm2.median()), int(ppm2.quantile(.75)), int(ppm2.max()),
+                    int(ppm2.mean()),
+                ],
+            }),
+            hide_index=True, use_container_width=True,
+        )
+
+    st.markdown("**By source** — median zł/m² and spread")
+    by_src = (
+        df.dropna(subset=["ppm2"]).groupby("source")["ppm2"]
+        .agg(count="count", min="min", median="median", max="max")
+        .round(0).astype(int).reset_index()
+    )
+    st.dataframe(by_src, hide_index=True, use_container_width=True)
+
+# ── Price changes ─────────────────────────────────────────────────────
+
+st.divider()
+st.subheader("💸 Recent price changes")
+st.caption(
+    "Portals edit prices in place, keeping the same listing id. The scanner "
+    "notices and re-notifies — these are those moves."
+)
+history = load_price_history()
+if history.empty:
+    st.info(
+        "No price changes recorded yet. This fills in once a listing the "
+        "scanner already knows about changes price."
+    )
+else:
+    history["delta"] = history["new_price"] - history["old_price"]
+    history["pct"] = (history["delta"] / history["old_price"] * 100).round(1)
+    st.dataframe(
+        history[["changed_at", "source", "title", "old_price", "new_price", "delta", "pct", "url"]].head(50),
+        hide_index=True,
+        column_config={
+            "changed_at": st.column_config.DatetimeColumn("When"),
+            "source": st.column_config.TextColumn("Source", width="small"),
+            "title": st.column_config.TextColumn("Title", width="large"),
+            "old_price": st.column_config.NumberColumn("Was", format="%d"),
+            "new_price": st.column_config.NumberColumn("Now", format="%d"),
+            "delta": st.column_config.NumberColumn("Δ zł", format="%d"),
+            "pct": st.column_config.NumberColumn("Δ %", format="%.1f"),
+            "url": st.column_config.LinkColumn("Open", display_text="↗"),
+        },
+    )
+
+# ── Source mix ────────────────────────────────────────────────────────
+
+st.divider()
+st.subheader("Where listings come from")
+by_source = df.groupby("source").size().reset_index(name="count").sort_values("count", ascending=False)
+fig = px.bar(by_source, x="source", y="count", text="count")
+fig.update_layout(height=300, showlegend=False, xaxis_title=None, yaxis_title=None)
+st.plotly_chart(fig, use_container_width=True)

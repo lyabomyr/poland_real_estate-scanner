@@ -62,7 +62,21 @@ def _card_to_listing(card) -> Optional[Listing]:
             area=parse_area(info_text),
             rooms=parse_rooms(info_text),
             location=location,
+            image_url=_pick_image(card),
         )
     except Exception as e:
         log.debug("morizon: card parse error: %s", e)
         return None
+
+
+def _pick_image(card) -> Optional[str]:
+    """First listing photo. Morizon cards also embed UI icons served from
+    ``/nuxt-assets/`` as SVG — those must not be mistaken for a thumbnail."""
+    for img in card.find_all("img"):
+        src = img.get("src") or img.get("data-src") or ""
+        if not src.startswith("http") or src.endswith(".svg"):
+            continue
+        if "/nuxt-assets/" in src:
+            continue
+        return src
+    return None

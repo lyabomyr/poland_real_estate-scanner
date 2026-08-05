@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from ui import render_connection_status
+from ui import render_connection_status, target_picker
 from db import load_chats, load_listings
 
 st.set_page_config(page_title="Listings — Kraków flats", page_icon="📋", layout="wide")
@@ -20,32 +20,7 @@ if not render_connection_status():
 
 # ── Target (chat) picker ──────────────────────────────────────────────
 
-chats = load_chats()
-ALL = "__all__"
-options = [ALL] + chats["chat_id"].astype(str).tolist()
-
-
-def _chat_label(chat_id: str) -> str:
-    if chat_id == ALL:
-        return "🌍 All chats (everything matched)"
-    row = chats[chats["chat_id"].astype(str) == chat_id]
-    if row.empty:
-        return chat_id
-    title = row.iloc[0]["title"] or "(no title)"
-    suffix = "" if bool(row.iloc[0]["enabled"]) else "  ⏸ disabled"
-    return f"{title} — {chat_id}{suffix}"
-
-
-picked = st.selectbox(
-    "Target",
-    options=options,
-    format_func=_chat_label,
-    help=(
-        "Pick a chat to see only what was delivered there. Chats with different "
-        "price/area/keyword overrides legitimately receive different listings."
-    ),
-)
-chat_id = None if picked == ALL else picked
+chat_id, chat_label_text = target_picker(load_chats())
 
 df = load_listings(chat_id)
 if df.empty:

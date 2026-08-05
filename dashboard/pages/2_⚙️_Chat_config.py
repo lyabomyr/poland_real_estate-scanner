@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from ui import render_connection_status
+from ui import chat_label, preselected_chat_id, render_connection_status
 from db import (
     effective_config,
     get_repo,
@@ -24,6 +24,8 @@ from db import (
     upsert_chat_override,
 )
 from scanner.chat_config import ChatOverride
+from scanner.cities import city_keys, city_label
+from scanner.introspection import format_decision_tree
 
 st.set_page_config(page_title="Chat config — Kraków flats", page_icon="⚙️", layout="wide")
 st.title("⚙️ Chat configuration")
@@ -47,17 +49,14 @@ if chats.empty:
 
 # ── Chat picker ───────────────────────────────────────────────────────
 
-def _label(chat_id: str) -> str:
-    row = chats[chats["chat_id"].astype(str) == chat_id]
-    if row.empty:
-        return chat_id
-    title = row.iloc[0]["title"] or "(no title)"
-    suffix = "" if bool(row.iloc[0]["enabled"]) else "  ⏸ disabled"
-    return f"{title} — {chat_id}{suffix}"
-
-
+# Honour ?chat_id=… so the link the bot pins opens straight on this chat.
+_options = chats["chat_id"].astype(str).tolist()
+_preset = preselected_chat_id(chats)
 picked = st.selectbox(
-    "Chat", options=chats["chat_id"].astype(str).tolist(), format_func=_label
+    "Chat",
+    options=_options,
+    index=_options.index(_preset) if _preset in _options else 0,
+    format_func=lambda cid: chat_label(chats, cid),
 )
 
 repo = get_repo()
@@ -88,6 +87,23 @@ def _origin(is_overridden: bool, default_text: str) -> None:
 
 
 # ── Search thresholds ─────────────────────────────────────────────────
+
+st.subheader("City")
+st.caption(
+    "Drives every source URL. Switch it and this chat starts scanning a "
+    "different market — create a second chat for Katowice and leave this one "
+    "on Kraków."
+)
+_city_options = city_keys()
+_eff_city = eff.city_key()
+new_city = st.selectbox(
+    "City",
+    options=_city_options,
+    index=_city_options.index(_eff_city) if _eff_city in _city_options else 0,
+    format_func=city_label,
+)
+_baseline_city = (baseline.get("search") or {}).get("city") or "krakow"
+_origin(override.city is not None, city_label(_baseline_city))
 
 st.subheader("Search thresholds")
 c1, c2, c3, c4 = st.columns(4)
@@ -219,6 +235,31 @@ with st.expander("Show the baseline lists this chat inherits"):
     b3.markdown("**Reject**")
     b3.code("\n".join(baseline.get("filters", {}).get("reject_keywords", [])) or "—")
 
+# ── Decision tree ─────────────────────────────────────────────────────
+
+st.divider()
+st.subheader("🌳 Decision tree")
+st.caption(
+    "Generated from the effective config above — the same text the bot returns "
+    "for /decision_tree, so the two can never disagree."
+)
+with st.expander("Show how a listing is accepted, rejected or skipped", expanded=False):
+    st.code(format_decision_tree(baseline, override), language="text")
+
+with st.expander("Words that make us skip a listing entirely"):
+    st.caption(
+        "Any hit in title + description + location drops the listing. Matched "
+        "as a prefix on a word boundary, so `udział` also catches `udziału`."
+    )
+    rejects = eff.reject_keywords()
+    base_rejects = (baseline.get("filters") or {}).get("reject_keywords", [])
+    r1, r2 = st.columns(2)
+    r1.markdown(f"**Baseline ({len(base_rejects)})**")
+    r1.code("\n".join(base_rejects) or "—")
+    extra = [k for k in rejects if k not in base_rejects]
+    r2.markdown(f"**Added for this chat ({len(extra)})**")
+    r2.code("\n".join(extra) or "— none —")
+
 # ── Save / reset ──────────────────────────────────────────────────────
 
 st.divider()
@@ -232,6 +273,7 @@ if col_save.button("💾 Save", type="primary"):
     # Only persist genuine deviations from the baseline: setting a field back
     # to its default removes it from the override entirely.
     new_override = ChatOverride(
+        city=new_city if new_city != _baseline_city else None,
         max_price=new_max_price if new_max_price and new_max_price != base_max_price else None,
         min_area=new_min_area if new_min_area and new_min_area != base_min_area else None,
         max_area=new_max_area or None,

@@ -92,6 +92,17 @@ def _pick_location(it: dict) -> Optional[str]:
     return ", ".join(parts) or None
 
 
+def _pick_image(it: dict) -> Optional[str]:
+    """First thumbnail from the ``images`` array (medium, else large)."""
+    images = it.get("images")
+    if not isinstance(images, list) or not images:
+        return None
+    first = images[0]
+    if isinstance(first, dict):
+        return first.get("medium") or first.get("large") or first.get("small")
+    return first if isinstance(first, str) else None
+
+
 def _to_listing(it: dict) -> Optional[Listing]:
     try:
         _id = str(it.get("id") or "")
@@ -113,6 +124,7 @@ def _to_listing(it: dict) -> Optional[Listing]:
             location=_pick_location(it),
             build_year=int(build_year) if isinstance(build_year, (int, float)) else None,
             description=it.get("shortDescription") or it.get("description"),
+            image_url=_pick_image(it),
         )
     except Exception as e:
         log.debug("otodom: item parse error: %s", e)

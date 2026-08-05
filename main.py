@@ -25,10 +25,14 @@ from scanner.registry import SOURCE_REGISTRY
 from scanner.runtime_config import load_runtime_config
 from scanner.storage import SeenStore
 from scanner.telegram import (
+    chat_dashboard_url,
+    default_reply_keyboard,
     discover_chats,
     find_new_chat_memberships,
     get_chat_title,
+    pin_message,
     send_greeting,
+    send_message_returning_id,
 )
 
 
@@ -182,6 +186,36 @@ def _greet_new_chats(
             store.record_greeted(cid, c["title"])
             _register_chat(cid, c["title"], repo, log)
             log.info("greet: announced chat_id=%s (%s)", cid, c["title"])
+            _pin_config_link(bot_token, cid, dashboard_url, log)
+
+
+def _pin_config_link(
+    bot_token: str,
+    chat_id,
+    dashboard_url: Optional[str],
+    log: logging.Logger,
+) -> None:
+    """Post and pin a deep link to this chat's own dashboard config page.
+
+    Pinned so it stays reachable from the chat header instead of scrolling
+    away under listing notifications. Entirely best-effort: no dashboard
+    configured, or the bot not being an admin, both just skip it.
+    """
+    url = chat_dashboard_url(dashboard_url, chat_id)
+    if not url:
+        return
+    text = (
+        "⚙️ <b>Settings for this chat</b>\n"
+        f'<a href="{url}">Open the dashboard</a>\n\n'
+        "Change price, area, city, sources and keywords there — it applies on "
+        "the next scan. Or use the commands (see /help)."
+    )
+    message_id = send_message_returning_id(
+        bot_token, chat_id, text=text, parse_mode="HTML",
+        reply_markup=default_reply_keyboard(),
+    )
+    if message_id and pin_message(bot_token, chat_id, message_id):
+        log.info("pinned config link in chat %s", chat_id)
 
 
 def _register_chat(chat_id, title, repo: ChatConfigRepo, log: logging.Logger) -> None:

@@ -188,6 +188,44 @@ def discover_chats(bot_token: str, timeout: int = 10) -> List[dict]:
     return list(seen.values())
 
 
+def chat_dashboard_url(dashboard_url: Optional[str], chat_id) -> Optional[str]:
+    """Deep-link to this chat's config page: ``<base>/Chat_config?chat_id=…``.
+
+    Streamlit exposes pages at ``/<Page_Name>`` and reads ``?chat_id=`` into
+    ``st.query_params``, which the dashboard uses to preselect the chat. So a
+    group can jump from Telegram straight to its own settings.
+    """
+    if not dashboard_url:
+        return None
+    return f"{dashboard_url.rstrip('/')}/Chat_config?chat_id={chat_id}"
+
+
+def pin_message(bot_token: str, chat_id, message_id: int, timeout: int = 15) -> bool:
+    """Pin a message. Best-effort: needs admin rights in groups.
+
+    Returns False (and logs at debug) when the bot isn't an admin — pinning
+    is a nicety and must never interrupt a scan.
+    """
+    if not bot_token or bot_token.startswith("REPLACE"):
+        return False
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/pinChatMessage",
+            data={
+                "chat_id": chat_id,
+                "message_id": int(message_id),
+                "disable_notification": "true",
+            },
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        return bool(r.json().get("ok"))
+    except Exception as e:
+        # Very common and harmless: "not enough rights to pin a message".
+        log.debug("pin failed in %s: %s", chat_id, e)
+        return False
+
+
 def send_message(
     bot_token: str,
     chat_id,
@@ -217,6 +255,38 @@ def send_message(
     )
     r.raise_for_status()
     return True
+
+
+def send_message_returning_id(
+    bot_token: str,
+    chat_id,
+    *,
+    text: str,
+    parse_mode: Optional[str] = None,
+    reply_markup: Optional[dict] = None,
+    timeout: int = 15,
+) -> Optional[int]:
+    """Send a message and return its ``message_id`` (needed to pin it)."""
+    data = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": "true",
+    }
+    if parse_mode:
+        data["parse_mode"] = parse_mode
+    if reply_markup is not None:
+        data["reply_markup"] = json.dumps(reply_markup)
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            data=data,
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        return (r.json().get("result") or {}).get("message_id")
+    except Exception as e:
+        log.error("send failed to %s: %s", chat_id, e)
+        return None
 
 
 def get_chat_title(bot_token: str, chat_id, timeout: int = 15) -> Optional[str]:

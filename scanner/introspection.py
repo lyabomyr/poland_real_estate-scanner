@@ -9,6 +9,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import yaml
 
 from .chat_config import ChatOverride, EffectiveConfig
+from .cities import city_label
 from .registry import SOURCE_REGISTRY
 from .filters import ListingFilter
 from .scoring import DealScorer, ScoringWeights
@@ -189,6 +190,11 @@ def format_decision_tree(
     lines = [
         "Decision tree (effective runtime)",
         "",
+        "0. Market",
+        f"- City: {city_label(ec.city_key())} ({ec.city_key()})",
+        "- Source URLs are generated from this city + max_price + min_area,",
+        "  unless a URL is pinned explicitly for a source.",
+        "",
         "1. Source gate",
         f"- Active sources: {', '.join(ec.enabled_source_names()) or '(none)'}",
         "- Disabled sources are skipped before fetch.",
@@ -201,7 +207,9 @@ def format_decision_tree(
         [
             "",
             "3. Per-chat delivery gates",
-            "- Skip if this chat already emitted the exact listing key.",
+            "- Skip if this chat already emitted the exact listing key,",
+            "  UNLESS the price changed since we told this chat — then re-notify",
+            "  with the delta (this is how price cuts surface).",
             "- Skip if the fuzzy key was already emitted to this chat.",
             f"- Fuzzy key formula: {_DEDUP_DESCRIPTION['cross_source']}",
             "- Missing price / area / location disables fuzzy dedup for that listing.",

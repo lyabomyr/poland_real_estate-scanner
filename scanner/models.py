@@ -52,6 +52,7 @@ class Listing:
     location: Optional[str] = None     # free-form "street, district, city, region"
     build_year: Optional[int] = None
     description: Optional[str] = None
+    image_url: Optional[str] = None    # thumbnail, for dashboard cards
 
     # Set by the scoring phase (main.py) once per run. Not part of the natural
     # source data — treat as derived.

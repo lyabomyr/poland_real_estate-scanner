@@ -43,6 +43,46 @@ Each `update_id` is claimed in `command_updates` before dispatch, so a command
 is never executed twice. Mutations land in `chat_configs` in the same run that
 answers them — so the scan you're waiting on already applies the new setting.
 
+## Price changes
+
+Portals edit a price in place, keeping the same listing id — so a naive
+`seen`-based dedup would swallow every price cut, which is the single most
+useful signal a buyer gets.
+
+`chat_emissions.emitted_price` records what each chat was told. When a
+re-seen listing's price differs from that, it is notified again, led by:
+
+```
+🔔 PRICE CHANGE
+⬇️ price cut 40 000 zł (7%) — was 590 000 zł
+```
+
+Every move is also appended to `price_history`, which the dashboard renders
+as a "recent price changes" table.
+
+## Cities and generated URLs
+
+Source URLs are **built**, not hardcoded, from `search.city` +
+`search.max_price` + `search.min_area` via each source's `URL_TEMPLATE`.
+That's what makes `city:` meaningful — a hardcoded Kraków URL would render
+the setting inert.
+
+Supported cities live in [`scanner/cities.py`](scanner/cities.py) (krakow,
+katowice, warszawa, wroclaw, poznan, gdansk, gdynia, lodz, szczecin, lublin,
+bydgoszcz, rzeszow). Each entry carries the per-portal spelling: Otodom wants
+an ascii voivodeship slug in the path, komornik.pl wants the Polish
+voivodeship name as a query param.
+
+Because `city` is a per-chat override, one group can watch Kraków while
+another watches Katowice off the same deployment. Verified live for both:
+Kraków 96 listings, Katowice 81.
+
+URL precedence, most specific first:
+
+1. per-chat `source_urls[name]` (dashboard → Chat config → advanced)
+2. explicit `url` in the YAML source block
+3. generated from city + thresholds
+
 ## Defaults and filters
 
 Defaults live in [`config.example.yml`](config.example.yml):

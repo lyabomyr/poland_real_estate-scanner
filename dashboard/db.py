@@ -168,6 +168,43 @@ def load_listings(chat_id: Optional[str] = None) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=60)
+def load_listings_full(chat_id: Optional[str] = None) -> pd.DataFrame:
+    """Like :func:`load_listings` but with the card fields (image, blurb, location).
+
+    Kept separate so the big table view doesn't drag description blobs over
+    the wire on every rerun.
+    """
+    cols = (
+        "key, source, title, url, price, area, score, score_reasons, "
+        "location, description, image_url, fuzzy_key, first_seen_at"
+    )
+    if chat_id is None:
+        return _query_df(
+            f"SELECT {cols}, NULL AS sent_at FROM seen WHERE status = 'matched' "
+            "ORDER BY score DESC NULLS LAST, price ASC"
+        )
+    prefixed = ", ".join(f"s.{c.strip()}" for c in cols.split(","))
+    return _query_df(
+        f"SELECT {prefixed}, e.sent_at "
+        "FROM chat_emissions e JOIN seen s ON s.key = e.listing_key "
+        "WHERE e.chat_id = ? AND s.status = 'matched' "
+        "ORDER BY s.score DESC NULLS LAST, s.price ASC",
+        (str(chat_id),),
+    )
+
+
+@st.cache_data(ttl=60)
+def load_price_history() -> pd.DataFrame:
+    """Every recorded price move, newest first."""
+    return _query_df(
+        "SELECT h.listing_key, h.old_price, h.new_price, h.changed_at, "
+        "       s.source, s.title, s.url, s.area "
+        "FROM price_history h LEFT JOIN seen s ON s.key = h.listing_key "
+        "ORDER BY h.changed_at DESC"
+    )
+
+
+@st.cache_data(ttl=60)
 def load_emissions_joined() -> pd.DataFrame:
     """Chat emissions joined with the listing they refer to. One row per (chat, listing)."""
     return _query_df(
