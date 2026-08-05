@@ -171,6 +171,34 @@ Behavior:
   fallback bootstrap/safety net
 - Empty or missing `TG_CHAT_ID` must not break workflows or runtime config
 
+## The dashboard link in Telegram
+
+Every enabled chat gets a message with a deep link to **its own** config page
+(`<dashboard>/Chat_config?chat_id=…`), pinned so it stays reachable from the
+chat header.
+
+Two things have to be true:
+
+1. **`DASHBOARD_URL` is set** as a GitHub Actions *variable* (Settings →
+   Secrets and variables → Actions → Variables). Without it the step is
+   skipped silently — there's nothing to link to.
+2. **The bot is a chat admin**, otherwise Telegram refuses `pinChatMessage`.
+   The message is still delivered; only the pin is skipped, and the log says
+   which happened.
+
+Delivery is self-healing: every scan checks each chat and posts the link if
+that chat doesn't have the current URL recorded in `pinned_dashboards`. So a
+chat registered before `DASHBOARD_URL` existed picks it up on the next run,
+and changing the URL re-pins everywhere. To force it now:
+
+```bash
+make pin-dashboard
+```
+
+**Make the app public**, or the link is useless to anyone who isn't signed
+into your Streamlit account: Manage app → Settings → Sharing → "This app is
+public and searchable".
+
 ## Streamlit dashboard
 
 The dashboard URL is public and should be stored as a **GitHub Actions

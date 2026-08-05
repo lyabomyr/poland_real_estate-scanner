@@ -146,6 +146,13 @@ _SCHEMA_STMTS = [
     # them here makes command + greeting handling idempotent across retries
     # and scanner restarts.
     """
+    CREATE TABLE IF NOT EXISTS pinned_dashboards (
+        chat_id      TEXT PRIMARY KEY,
+        url          TEXT,
+        pinned_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS price_history (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
         listing_key TEXT NOT NULL,
@@ -257,6 +264,33 @@ class SeenStore:
         self.conn.execute(
             "INSERT OR IGNORE INTO greeted_chats (chat_id, title) VALUES (?, ?)",
             (str(chat_id), title),
+        )
+        self.conn.commit()
+
+    # ── pinned dashboard link ──────────────────────────────────────────
+
+    def dashboard_pinned_url(self, chat_id) -> Optional[str]:
+        """URL of the dashboard link already pinned in a chat, if any.
+
+        Tracked separately from ``greeted_chats`` so the pin can appear later:
+        chats registered before DASHBOARD_URL existed would otherwise never
+        get one, because greeting only ever happens once.
+        """
+        cur = self.conn.execute(
+            "SELECT url FROM pinned_dashboards WHERE chat_id = ?", (str(chat_id),)
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+
+    def record_dashboard_pin(self, chat_id, url: str) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO pinned_dashboards (chat_id, url, pinned_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(chat_id) DO UPDATE SET
+                url = excluded.url, pinned_at = excluded.pinned_at
+            """,
+            (str(chat_id), url),
         )
         self.conn.commit()
 

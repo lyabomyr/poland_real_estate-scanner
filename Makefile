@@ -37,6 +37,9 @@ chats: config  ## list chats the bot has recently seen (for picking chat_id)
 greet: config  ## announce chat_id in every chat the bot has newly joined
 	$(PY) main.py --greet-chats
 
+pin-dashboard: config  ## (re)post + pin the dashboard link in every chat
+	$(PY) main.py --pin-dashboard
+
 prune: config  ## archive + delete rejected rows older than storage.prune_rejected_days
 	$(PY) main.py --prune
 

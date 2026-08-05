@@ -51,6 +51,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="archive + delete rejected rows older than storage.prune_rejected_days")
     p.add_argument("--greet-chats", action="store_true",
                    help="announce chat_id in newly-joined chats, then exit")
+    p.add_argument("--pin-dashboard", action="store_true",
+                   help="re-post and pin the dashboard link in every chat, then exit")
     return p
 
 
@@ -112,6 +114,18 @@ def main() -> int:
 
         # 4) Build one ChatContext per enabled chat and run the pipeline.
         _resolve_placeholder_titles(bot_token, repo, log)
+
+        # Self-healing: any chat still missing the link gets it now, including
+        # ones registered before DASHBOARD_URL was set.
+        if not args.dry_run or args.pin_dashboard:
+            n = _sync_dashboard_pins(
+                bot_token, store, repo, dashboard_url, log,
+                force=args.pin_dashboard,
+            )
+            if n:
+                log.info("dashboard link delivered to %d chat(s)", n)
+        if args.pin_dashboard:
+            return 0
 
         chats = [c for c in repo.list_enabled() if not c.override.paused]
         if not chats:
@@ -193,36 +207,60 @@ def _greet_new_chats(
             store.record_greeted(cid, c["title"])
             _register_chat(cid, c["title"], repo, log)
             log.info("greet: announced chat_id=%s (%s)", cid, c["title"])
-            _pin_config_link(bot_token, cid, dashboard_url, log)
 
 
-def _pin_config_link(
+def _sync_dashboard_pins(
     bot_token: str,
-    chat_id,
+    store: SeenStore,
+    repo: ChatConfigRepo,
     dashboard_url: Optional[str],
     log: logging.Logger,
-) -> None:
-    """Post and pin a deep link to this chat's own dashboard config page.
+    force: bool = False,
+) -> int:
+    """Post + pin the dashboard link in every chat that doesn't have it yet.
 
-    Pinned so it stays reachable from the chat header instead of scrolling
-    away under listing notifications. Entirely best-effort: no dashboard
-    configured, or the bot not being an admin, both just skip it.
+    Runs on every scan rather than only when a chat is first greeted. That
+    matters: chats registered before ``DASHBOARD_URL`` was configured would
+    otherwise never get a link, because greeting happens exactly once. Keying
+    off the pinned URL also means changing DASHBOARD_URL re-pins automatically.
+
+    Best-effort throughout — no dashboard configured, or the bot not being an
+    admin, just skips. Returns how many chats were pinned.
     """
-    url = chat_dashboard_url(dashboard_url, chat_id)
-    if not url:
-        return
-    text = (
-        "⚙️ <b>Settings for this chat</b>\n"
-        f'<a href="{url}">Open the dashboard</a>\n\n'
-        "Change price, area, city, sources and keywords there — it applies on "
-        "the next scan. Or use the commands (see /help)."
-    )
-    message_id = send_message_returning_id(
-        bot_token, chat_id, text=text, parse_mode="HTML",
-        reply_markup=default_reply_keyboard(),
-    )
-    if message_id and pin_message(bot_token, chat_id, message_id):
-        log.info("pinned config link in chat %s", chat_id)
+    if not dashboard_url or not bot_token or bot_token.startswith("REPLACE"):
+        return 0
+
+    pinned = 0
+    for chat in repo.list_enabled():
+        url = chat_dashboard_url(dashboard_url, chat.chat_id)
+        if not url:
+            continue
+        if not force and store.dashboard_pinned_url(chat.chat_id) == url:
+            continue
+        text = (
+            "⚙️ <b>Settings for this chat</b>\n"
+            f'<a href="{url}">Open the dashboard</a>\n\n'
+            "Price, area, city, sources and keywords — change them there and "
+            "the next scan picks it up. Commands work too: /help"
+        )
+        message_id = send_message_returning_id(
+            bot_token, chat.chat_id, text=text, parse_mode="HTML",
+            reply_markup=default_reply_keyboard(),
+        )
+        if not message_id:
+            continue
+        # Record even when pinning is refused (bot isn't admin) — the message
+        # itself was delivered, and retrying every 15 min would be spam.
+        if pin_message(bot_token, chat.chat_id, message_id):
+            log.info("pinned dashboard link in chat %s", chat.chat_id)
+        else:
+            log.info(
+                "posted dashboard link in chat %s (pin needs admin rights)",
+                chat.chat_id,
+            )
+        store.record_dashboard_pin(chat.chat_id, url)
+        pinned += 1
+    return pinned
 
 
 def _register_chat(chat_id, title, repo: ChatConfigRepo, log: logging.Logger) -> None:
