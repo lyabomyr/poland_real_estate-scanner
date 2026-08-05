@@ -190,6 +190,11 @@ class MultiChatPipeline:
         for listings in matched.values():
             for l in listings:
                 l.score = ctx.scorer.score(l, context)
+                # Persist it so the dashboard can display and sort by score.
+                # Scoring runs after the row is inserted (the median needs the
+                # full run sample), hence a follow-up UPDATE.
+                if not self.dry_run:
+                    self.store.update_score(l.dedup_key, l.score)
 
     # ── phase 3 ────────────────────────────────────────────────────────
 

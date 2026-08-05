@@ -1,12 +1,16 @@
-"""Sortable / filterable table of every matched listing."""
+"""Matched listings, scoped per chat, ranked by deal score.
+
+Each chat has its own filters, so "what matched" and "what *this chat* was
+notified about" are different sets. The target picker switches between them;
+the default is the union across every chat.
+"""
 
 from __future__ import annotations
 
-import pandas as pd
 import streamlit as st
 
 from ui import render_connection_status
-from db import load_seen
+from db import load_chats, load_listings
 
 st.set_page_config(page_title="Listings — Kraków flats", page_icon="📋", layout="wide")
 st.title("📋 Matched listings")
@@ -14,68 +18,143 @@ st.title("📋 Matched listings")
 if not render_connection_status():
     st.stop()
 
-df = load_seen(status="matched")
+# ── Target (chat) picker ──────────────────────────────────────────────
+
+chats = load_chats()
+ALL = "__all__"
+options = [ALL] + chats["chat_id"].astype(str).tolist()
+
+
+def _chat_label(chat_id: str) -> str:
+    if chat_id == ALL:
+        return "🌍 All chats (everything matched)"
+    row = chats[chats["chat_id"].astype(str) == chat_id]
+    if row.empty:
+        return chat_id
+    title = row.iloc[0]["title"] or "(no title)"
+    suffix = "" if bool(row.iloc[0]["enabled"]) else "  ⏸ disabled"
+    return f"{title} — {chat_id}{suffix}"
+
+
+picked = st.selectbox(
+    "Target",
+    options=options,
+    format_func=_chat_label,
+    help=(
+        "Pick a chat to see only what was delivered there. Chats with different "
+        "price/area/keyword overrides legitimately receive different listings."
+    ),
+)
+chat_id = None if picked == ALL else picked
+
+df = load_listings(chat_id)
 if df.empty:
-    st.info("No matched listings yet.")
+    st.info(
+        "Nothing delivered to this chat yet. A newly registered chat starts "
+        "with a clean slate — the historical backlog is suppressed on purpose "
+        "so it isn't flooded on its first scan."
+        if chat_id else
+        "No matched listings yet — trigger the **scan** workflow and refresh."
+    )
     st.stop()
 
-# ── Filters ───────────────────────────────────────────────────────────
+# ── Sidebar filters ───────────────────────────────────────────────────
 
 with st.sidebar:
     st.subheader("Filter")
-    sources = sorted(df["source"].unique().tolist())
+
+    sources = sorted(df["source"].dropna().unique().tolist())
     picked_src = st.multiselect("Source", sources, default=sources)
 
-    price_min = int(df["price"].dropna().min()) if df["price"].notna().any() else 0
-    price_max = int(df["price"].dropna().max()) if df["price"].notna().any() else 1_000_000
-    price_range = st.slider(
-        "Price (PLN)",
-        min_value=price_min,
-        max_value=price_max,
-        value=(price_min, price_max),
-        step=10_000,
-    )
+    score_range = None
+    if df["score"].notna().any():
+        smin, smax = int(df["score"].min()), int(df["score"].max())
+        score_range = st.slider(
+            "Deal score",
+            min_value=smin, max_value=max(smax, smin + 1), value=(smin, smax),
+            help="Rule-based 0-100. Ask the bot /decision_tree for the formula.",
+        )
+    else:
+        st.caption("⏳ No scores stored yet — the next scan writes them.")
 
-    area_min = float(df["area"].dropna().min()) if df["area"].notna().any() else 0.0
-    area_max = float(df["area"].dropna().max()) if df["area"].notna().any() else 200.0
-    area_range = st.slider(
-        "Area (m²)",
-        min_value=float(area_min),
-        max_value=float(area_max),
-        value=(float(area_min), float(area_max)),
-        step=1.0,
-    )
+    price_range = None
+    if df["price"].notna().any():
+        pmin, pmax = int(df["price"].dropna().min()), int(df["price"].dropna().max())
+        price_range = st.slider(
+            "Price (PLN)",
+            min_value=pmin, max_value=max(pmax, pmin + 1), value=(pmin, pmax), step=10_000,
+        )
+
+    area_range = None
+    if df["area"].notna().any():
+        amin, amax = float(df["area"].dropna().min()), float(df["area"].dropna().max())
+        area_range = st.slider(
+            "Area (m²)",
+            min_value=amin, max_value=max(amax, amin + 1.0), value=(amin, amax), step=1.0,
+        )
 
     search = st.text_input("Search in title", "")
 
-# Apply filters
+# ── Apply filters ─────────────────────────────────────────────────────
+# Rows with missing values are kept: an unpublished area is not evidence
+# against a listing (same convention as scanner/filters.py).
+
 mask = df["source"].isin(picked_src)
-if df["price"].notna().any():
-    mask &= (df["price"].isna()) | df["price"].between(price_range[0], price_range[1])
-if df["area"].notna().any():
-    mask &= (df["area"].isna()) | df["area"].between(area_range[0], area_range[1])
+if score_range is not None:
+    mask &= df["score"].isna() | df["score"].between(*score_range)
+if price_range is not None:
+    mask &= df["price"].isna() | df["price"].between(*price_range)
+if area_range is not None:
+    mask &= df["area"].isna() | df["area"].between(*area_range)
 if search:
     mask &= df["title"].str.contains(search, case=False, na=False)
-filtered = df[mask].copy()
 
-# Derived columns for a friendlier view
-filtered["ppm2"] = filtered.apply(
+view = df[mask].copy()
+view["ppm2"] = view.apply(
     lambda r: int(r["price"] / r["area"]) if r["price"] and r["area"] and r["area"] > 0 else None,
     axis=1,
 )
-filtered["price"] = filtered["price"].apply(lambda v: f"{int(v):,}".replace(",", " ") if pd.notna(v) else "—")
 
-st.caption(f"Showing **{len(filtered)}** of {len(df)} matched listings.")
+# ── Summary + table ───────────────────────────────────────────────────
+
+left, mid, right = st.columns(3)
+left.metric("Shown", f"{len(view)} / {len(df)}")
+if view["score"].notna().any():
+    mid.metric("Best score", int(view["score"].max()))
+if view["ppm2"].notna().any():
+    right.metric("Median zł/m²", f"{int(view['ppm2'].median()):,}".replace(",", " "))
+
+st.caption("Sorted by deal score (high → low), then price (low → high).")
+
+columns = ["score", "score_reasons", "source", "title", "price", "area", "ppm2", "first_seen_at"]
+if chat_id:
+    columns.append("sent_at")
+columns.append("url")
 
 st.dataframe(
-    filtered[["source", "title", "price", "area", "ppm2", "fuzzy_key", "first_seen_at", "url"]],
+    view[columns],
     hide_index=True,
-    use_container_width=True,
+    height=620,
     column_config={
-        "url": st.column_config.LinkColumn("URL", display_text="↗"),
-        "price": st.column_config.TextColumn("Price (zł)"),
-        "area":  st.column_config.NumberColumn("m²", format="%.1f"),
-        "ppm2":  st.column_config.NumberColumn("zł/m²", format="%d"),
-        "first_seen_at": st.column_config.DatetimeColumn("Seen at"),
+        "score": st.column_config.ProgressColumn(
+            "★ Score", min_value=0, max_value=100, format="%d",
+            help="Rule-based deal quality, 0-100",
+        ),
+        "score_reasons": st.column_config.TextColumn("Why", width="medium"),
+        "source": st.column_config.TextColumn("Source", width="small"),
+        "title": st.column_config.TextColumn("Title", width="large"),
+        "price": st.column_config.NumberColumn("Price (zł)", format="%d"),
+        "area": st.column_config.NumberColumn("m²", format="%.1f"),
+        "ppm2": st.column_config.NumberColumn("zł/m²", format="%d"),
+        "first_seen_at": st.column_config.DatetimeColumn("First seen"),
+        "sent_at": st.column_config.DatetimeColumn("Delivered"),
+        "url": st.column_config.LinkColumn("Open", display_text="↗"),
     },
 )
+
+if not view["score"].notna().any():
+    st.info(
+        "Scores are written during a scan. Listings stored before score "
+        "persistence existed show blank here — new matches get a score "
+        "immediately."
+    )

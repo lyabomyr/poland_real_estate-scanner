@@ -65,12 +65,18 @@ _SCHEMA_STMTS = [
         status        TEXT NOT NULL,          -- 'matched' | 'rejected' | 'duplicate'
         reject_reason TEXT,                   -- populated only for status='rejected'
         fuzzy_key     TEXT,                   -- cross-source dedup — see models.py
+        score         INTEGER,                -- 0-100 DealScore, written after scoring
+        score_reasons TEXT,                   -- comma-joined reason tags for the score
         first_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
     """,
     "CREATE INDEX IF NOT EXISTS seen_source_idx ON seen(source)",
     "CREATE INDEX IF NOT EXISTS seen_status_idx ON seen(status)",
-    "CREATE INDEX IF NOT EXISTS seen_fuzzy_idx  ON seen(fuzzy_key)",
+    # NOTE: indexes on fuzzy_key / score live in SeenStore._migrate(), not
+    # here. CREATE TABLE IF NOT EXISTS is a no-op on an existing database, so
+    # a column added in a later version only appears after the ALTER in
+    # _migrate() — creating its index at this point would fail with
+    # "no such column" on any pre-existing DB.
     # Which chats the bot has already announced its chat_id to. We use this
     # to avoid re-sending the "Hi, your chat_id is X" message every 15 min
     # for the rest of the update's 24h retention window.
@@ -140,9 +146,18 @@ class SeenStore:
         """
         rows = self.conn.execute("PRAGMA table_info(seen)").fetchall()
         existing_cols = {r[1] for r in rows}
-        if "fuzzy_key" not in existing_cols:
-            self.conn.execute("ALTER TABLE seen ADD COLUMN fuzzy_key TEXT")
-            self.conn.execute("CREATE INDEX IF NOT EXISTS seen_fuzzy_idx ON seen(fuzzy_key)")
+        for column, ddl in (
+            ("fuzzy_key", "ALTER TABLE seen ADD COLUMN fuzzy_key TEXT"),
+            ("score", "ALTER TABLE seen ADD COLUMN score INTEGER"),
+            ("score_reasons", "ALTER TABLE seen ADD COLUMN score_reasons TEXT"),
+        ):
+            if column not in existing_cols:
+                self.conn.execute(ddl)
+
+        # Safe on both fresh and migrated databases: the columns above are
+        # guaranteed to exist by this point.
+        self.conn.execute("CREATE INDEX IF NOT EXISTS seen_fuzzy_idx ON seen(fuzzy_key)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS seen_score_idx ON seen(score)")
 
     def has(self, key: str) -> bool:
         cur = self.conn.execute("SELECT 1 FROM seen WHERE key = ? LIMIT 1", (key,))
@@ -216,6 +231,23 @@ class SeenStore:
                 reject_reason,
                 fuzzy_key,
             ),
+        )
+        self.conn.commit()
+
+    def update_score(self, key: str, score) -> None:
+        """Persist a listing's :class:`~scanner.models.DealScore`.
+
+        Scoring happens *after* the row is inserted (the median needs the
+        whole run's price/m² sample), so this is a follow-up UPDATE rather
+        than part of ``add()``. Storing it makes the score visible in the
+        dashboard and sortable in SQL — otherwise it only ever existed
+        inside one Telegram message.
+        """
+        if score is None:
+            return
+        self.conn.execute(
+            "UPDATE seen SET score = ?, score_reasons = ? WHERE key = ?",
+            (int(score.value), ", ".join(score.reasons) or None, key),
         )
         self.conn.commit()
 

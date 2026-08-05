@@ -1,8 +1,13 @@
-"""Per-chat config editor — the UI counterpart to the Telegram commands.
+"""Per-chat config editor.
 
-Everything you edit here writes to the ``chat_configs`` row for the
-selected chat. The scanner picks up changes on its next run, or immediately
-if you trigger ``/scan`` from Telegram.
+Every field shows its **effective** value — the chat's override if it has
+one, otherwise the baseline default from `config.yml`. A caption under each
+field says which of the two you're looking at, so an untouched chat displays
+the real defaults instead of blanks.
+
+Saving stores only genuine deviations: set a field back to its default value
+and the override disappears from the JSON blob. That keeps
+`chat_configs.config` readable and makes "reset" mean exactly one thing.
 """
 
 from __future__ import annotations
@@ -10,7 +15,14 @@ from __future__ import annotations
 import streamlit as st
 
 from ui import render_connection_status
-from db import get_repo, load_chats, set_chat_enabled, upsert_chat_override
+from db import (
+    effective_config,
+    get_repo,
+    load_baseline_config,
+    load_chats,
+    set_chat_enabled,
+    upsert_chat_override,
+)
 from scanner.chat_config import ChatOverride
 
 st.set_page_config(page_title="Chat config — Kraków flats", page_icon="⚙️", layout="wide")
@@ -20,178 +32,234 @@ if not render_connection_status():
     st.stop()
 
 st.markdown(
-    """
-    Each chat inherits every field from `config.yml` (the *baseline*).
-    Rows below live in the **`chat_configs`** table — each field you set
-    here **overrides** the baseline **for that chat only**.
-
-    Leave a numeric field at 0 (or empty) to fall back to baseline.
-    """
+    "Values below are what the scanner **will actually use** for the selected "
+    "chat. Anything not overridden here comes from `config.yml` — the shared "
+    "baseline every chat inherits. Changes apply on the next scan (≤ 15 min)."
 )
 
 chats = load_chats()
 if chats.empty:
     st.info(
-        "No chats registered yet. Add `@KrakowFlatsBot` to a group — the next scan will "
-        "register it here automatically. Or seed one via `config.yml → telegram.chat_id`."
+        "No chats registered yet. Add **@KrakowFlatsBot** to a group — it "
+        "registers itself on the next scan and will appear here."
     )
     st.stop()
 
 # ── Chat picker ───────────────────────────────────────────────────────
 
-options = {
-    row["chat_id"]: f"{row['title'] or '(no title)'}  —  {row['chat_id']}"
-    for _, row in chats.iterrows()
-}
-picked = st.selectbox("Chat", options=list(options.keys()), format_func=lambda k: options[k])
+def _label(chat_id: str) -> str:
+    row = chats[chats["chat_id"].astype(str) == chat_id]
+    if row.empty:
+        return chat_id
+    title = row.iloc[0]["title"] or "(no title)"
+    suffix = "" if bool(row.iloc[0]["enabled"]) else "  ⏸ disabled"
+    return f"{title} — {chat_id}{suffix}"
+
+
+picked = st.selectbox(
+    "Chat", options=chats["chat_id"].astype(str).tolist(), format_func=_label
+)
 
 repo = get_repo()
 row = repo.get(picked)
 if row is None:
-    st.error("Chat vanished — refresh the page.")
+    st.error("Chat vanished — reload the page.")
     st.stop()
 
 override = row.override
+baseline = load_baseline_config()
+eff = effective_config(override)
 
-# ── Row 1: numeric knobs ──────────────────────────────────────────────
+# Baseline values, used both to prefill and to decide what counts as an override.
+base_search = baseline.get("search") or {}
+base_max_price = int(base_search.get("max_price") or 0)
+base_min_area = float(base_search.get("min_area") or 0)
+base_min_year = int(base_search.get("min_build_year") or 0)
+base_group = int((baseline.get("notifications") or {}).get("min_group_size") or 3)
+KNOWN_SOURCES = tuple((baseline.get("sources") or {}).keys())
 
-st.subheader("Numeric overrides")
+
+def _origin(is_overridden: bool, default_text: str) -> None:
+    """One-line provenance caption under a field."""
+    if is_overridden:
+        st.caption(f"🔸 overridden for this chat · default: {default_text}")
+    else:
+        st.caption(f"⚪️ default from config.yml ({default_text})")
+
+
+# ── Search thresholds ─────────────────────────────────────────────────
+
+st.subheader("Search thresholds")
 c1, c2, c3, c4 = st.columns(4)
-new_max_price = c1.number_input(
-    "max_price (PLN)",
-    min_value=0, max_value=10_000_000, step=10_000,
-    value=int(override.max_price or 0),
-    help="0 = inherit baseline",
-)
-new_min_area = c2.number_input(
-    "min_area (m²)",
-    min_value=0.0, max_value=500.0, step=1.0,
-    value=float(override.min_area or 0),
-    help="0 = inherit baseline",
-)
-new_max_area = c3.number_input(
-    "max_area (m²)",
-    min_value=0.0, max_value=1000.0, step=1.0,
-    value=float(override.max_area or 0),
-    help="0 = no upper limit",
-)
-new_min_year = c4.number_input(
-    "min_build_year",
-    min_value=0, max_value=2100, step=1,
-    value=int(override.min_build_year or 0),
-    help="0 = inherit baseline (probably off)",
-)
 
-# ── Row 2: sources ────────────────────────────────────────────────────
+with c1:
+    new_max_price = st.number_input(
+        "max_price (PLN)", min_value=0, max_value=10_000_000, step=10_000,
+        value=int(eff.max_price() or 0),
+    )
+    _origin(override.max_price is not None, f"{base_max_price:,}".replace(",", " "))
+
+with c2:
+    new_min_area = st.number_input(
+        "min_area (m²)", min_value=0.0, max_value=500.0, step=1.0,
+        value=float(eff.min_area() or 0),
+    )
+    _origin(override.min_area is not None, f"{base_min_area:g}")
+
+with c3:
+    new_max_area = st.number_input(
+        "max_area (m²)", min_value=0.0, max_value=1000.0, step=1.0,
+        value=float(override.max_area or 0),
+        help="Chat-only setting — the baseline has no upper area bound. 0 = no limit.",
+    )
+    _origin(override.max_area is not None, "no limit")
+
+with c4:
+    eff_year = eff.min_build_year()
+    new_min_year = st.number_input(
+        "min_build_year", min_value=0, max_value=2100, step=1,
+        value=int(eff_year or 0),
+        help="0 = accept any build year.",
+    )
+    _origin(override.min_build_year is not None, str(base_min_year or "off"))
+
+new_group = st.number_input(
+    "min_group_size", min_value=1, max_value=50, step=1,
+    value=int(eff.min_group_size()),
+    help="N+ listings on the same street collapse into one message.",
+)
+_origin(override.min_group_size is not None, str(base_group))
+
+# ── Sources ───────────────────────────────────────────────────────────
 
 st.subheader("Sources")
-KNOWN = ("otodom", "olx", "morizon", "komornik")
-enabled_now = [s for s in KNOWN if s not in override.disabled_sources]
-picked_sources = st.multiselect("Enabled sources", KNOWN, default=enabled_now)
-new_disabled = [s for s in KNOWN if s not in picked_sources]
+enabled_now = [s for s in KNOWN_SOURCES if s not in override.disabled_sources]
+picked_sources = st.multiselect(
+    "Enabled for this chat", KNOWN_SOURCES, default=enabled_now,
+)
+new_disabled = [s for s in KNOWN_SOURCES if s not in picked_sources]
+_origin(bool(override.disabled_sources), f"all {len(KNOWN_SOURCES)} enabled")
 
 with st.expander("Per-source URL overrides (advanced)"):
-    st.caption("Leave blank to use the baseline URL. Custom URL only applies to this chat.")
+    st.caption(
+        "Blank = use the baseline URL shown underneath. A custom URL applies "
+        "to this chat only — handy for a different district or price band."
+    )
     new_source_urls: dict = {}
-    for s in KNOWN:
-        current = override.source_urls.get(s, "")
-        v = st.text_input(f"{s}.url", value=current, key=f"src_url_{s}")
-        if v.strip():
-            new_source_urls[s] = v.strip()
+    for name in KNOWN_SOURCES:
+        baseline_url = ((baseline.get("sources") or {}).get(name) or {}).get("url", "")
+        value = st.text_input(
+            f"{name}.url", value=override.source_urls.get(name, ""), key=f"url_{name}",
+        )
+        if value.strip():
+            new_source_urls[name] = value.strip()
+        st.caption(f"⚪️ default: `{baseline_url[:110]}{'…' if len(baseline_url) > 110 else ''}`")
 
-# ── Row 3: keywords ───────────────────────────────────────────────────
+# ── Keywords ──────────────────────────────────────────────────────────
 
-st.subheader("Extra keywords for this chat")
+st.subheader("Keywords")
+st.caption(
+    "These **add to** the baseline lists — they don't replace them. "
+    "Matched as a prefix on a word boundary, so `balkon` also catches "
+    "`balkonem`/`balkony`. Optional per-keyword weight: `taras @5`."
+)
 
 
 def _kw_lines(entries) -> str:
-    lines = []
+    out = []
     for e in entries:
         if isinstance(e, dict):
-            n, w = e.get("name"), e.get("weight")
-            lines.append(f"{n} @{w}" if w is not None else str(n))
+            name, weight = e.get("name"), e.get("weight")
+            out.append(f"{name} @{weight}" if weight is not None else str(name))
         else:
-            lines.append(str(e))
-    return "\n".join(lines)
+            out.append(str(e))
+    return "\n".join(out)
 
 
 def _parse_kw(text: str) -> list:
-    """Parse ``one keyword per line`` — plain string OR ``name @weight``."""
-    out = []
+    parsed = []
     for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
         if "@" in line:
-            name, _, w = line.rpartition("@")
-            name = name.strip()
+            name, _, weight = line.rpartition("@")
             try:
-                weight = int(w.strip())
-            except ValueError:
-                out.append(line)
+                parsed.append({"name": name.strip(), "weight": int(weight.strip())})
                 continue
-            out.append({"name": name, "weight": weight})
-        else:
-            out.append(line)
-    return out
+            except ValueError:
+                pass  # not a weight — treat the whole line as a keyword
+        parsed.append(line)
+    return parsed
 
 
-c1, c2, c3 = st.columns(3)
-new_pos_text = c1.text_area(
-    "Positive (+): one per line, optional `name @weight`",
-    value=_kw_lines(override.extra_positive),
-    height=140,
-    help="Adds to baseline scoring.positive_keywords. Prefix-match on word boundary.",
-)
-new_neg_text = c2.text_area(
-    "Negative (−): one per line, optional `name @weight`",
-    value=_kw_lines(override.extra_negative),
-    height=140,
-    help="Adds to baseline scoring.negative_keywords. Subtracted from the score.",
-)
-new_rej_text = c3.text_area(
-    "Reject: one per line",
-    value="\n".join(override.extra_reject),
-    height=140,
-    help="Adds to baseline filters.reject_keywords. Any hit → listing dropped entirely.",
-)
+k1, k2, k3 = st.columns(3)
+with k1:
+    new_pos = st.text_area(
+        "Extra positive (+)", value=_kw_lines(override.extra_positive), height=150,
+    )
+    st.caption(f"⚪️ baseline already has {len(baseline.get('scoring', {}).get('positive_keywords', []))}")
+with k2:
+    new_neg = st.text_area(
+        "Extra negative (−)", value=_kw_lines(override.extra_negative), height=150,
+    )
+    st.caption(f"⚪️ baseline already has {len(baseline.get('scoring', {}).get('negative_keywords', []))}")
+with k3:
+    new_rej = st.text_area(
+        "Extra reject", value="\n".join(override.extra_reject), height=150,
+    )
+    st.caption(f"⚪️ baseline already has {len(baseline.get('filters', {}).get('reject_keywords', []))}")
 
-# ── Save / actions ────────────────────────────────────────────────────
+with st.expander("Show the baseline lists this chat inherits"):
+    b1, b2, b3 = st.columns(3)
+    b1.markdown("**Positive**")
+    b1.code(_kw_lines(baseline.get("scoring", {}).get("positive_keywords", [])) or "—")
+    b2.markdown("**Negative**")
+    b2.code(_kw_lines(baseline.get("scoring", {}).get("negative_keywords", [])) or "—")
+    b3.markdown("**Reject**")
+    b3.code("\n".join(baseline.get("filters", {}).get("reject_keywords", [])) or "—")
+
+# ── Save / reset ──────────────────────────────────────────────────────
 
 st.divider()
-paused = st.checkbox("⏸ Pause — stop sending matches to this chat", value=override.paused)
+paused = st.checkbox(
+    "⏸ Pause — stop sending matches to this chat", value=override.paused,
+)
 
-col_save, col_reset, col_disable = st.columns([1, 1, 1])
-if col_save.button("💾 Save overrides", type="primary"):
+col_save, col_reset, col_off = st.columns([1, 1, 1])
+
+if col_save.button("💾 Save", type="primary"):
+    # Only persist genuine deviations from the baseline: setting a field back
+    # to its default removes it from the override entirely.
     new_override = ChatOverride(
-        max_price=new_max_price or None,
-        min_area=new_min_area or None,
+        max_price=new_max_price if new_max_price and new_max_price != base_max_price else None,
+        min_area=new_min_area if new_min_area and new_min_area != base_min_area else None,
         max_area=new_max_area or None,
-        min_build_year=new_min_year or None,
+        min_build_year=new_min_year if new_min_year and new_min_year != base_min_year else None,
+        min_group_size=new_group if new_group != base_group else None,
         disabled_sources=new_disabled,
         source_urls=new_source_urls,
-        extra_positive=_parse_kw(new_pos_text),
-        extra_negative=_parse_kw(new_neg_text),
-        extra_reject=[l.strip() for l in new_rej_text.splitlines() if l.strip()],
-        weights=override.weights,  # weight editing is command-line only for now
-        min_group_size=override.min_group_size,
+        extra_positive=_parse_kw(new_pos),
+        extra_negative=_parse_kw(new_neg),
+        extra_reject=[ln.strip() for ln in new_rej.splitlines() if ln.strip()],
+        weights=override.weights,
         paused=paused,
     )
     upsert_chat_override(picked, row.title, new_override)
-    st.success("Saved. The next scan will pick this up, or run /scan in Telegram.")
+    st.success("Saved. The next scan (≤ 15 min) picks this up.")
     st.rerun()
 
-if col_reset.button("↩ Reset all overrides"):
+if col_reset.button("↩️ Reset to defaults"):
+    # Keep only the pause flag — everything else falls back to config.yml.
     upsert_chat_override(picked, row.title, ChatOverride(paused=paused))
-    st.success("All overrides cleared; only pause state kept.")
+    st.success("Reset — this chat now uses the config.yml defaults.")
     st.rerun()
 
-if col_disable.button("🗑 Unregister chat"):
+if col_off.button("🗑 Unregister chat"):
     set_chat_enabled(picked, False)
-    st.warning("Chat disabled (row kept for history — set `enabled=1` in DB to restore).")
+    st.warning("Chat disabled. The row is kept for history.")
     st.rerun()
 
-# ── Live preview of the JSON blob ─────────────────────────────────────
-
-with st.expander("Raw override JSON (what gets persisted)"):
+with st.expander("Raw override JSON (exactly what gets stored)"):
+    st.caption("Empty `{}`-ish values mean 'inherit the baseline'.")
     st.code(override.to_json(), language="json")

@@ -22,9 +22,31 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from scanner.chat_config import ChatOverride  # noqa: E402
+from scanner.chat_config import ChatOverride, EffectiveConfig  # noqa: E402
 from scanner.chat_repo import ChatConfigRepo  # noqa: E402
+from scanner.runtime_config import load_runtime_config  # noqa: E402
 from scanner.storage import SeenStore  # noqa: E402
+
+
+@st.cache_data(ttl=300)
+def load_baseline_config() -> dict:
+    """The YAML baseline every chat inherits from.
+
+    Prefers a local ``config.yml`` (developer machine) and falls back to the
+    tracked ``config.example.yml``, which is what the deployed scanner runs
+    with. The dashboard needs this to show *effective* values — a chat with
+    no overrides should display the real defaults, not zeros.
+    """
+    for candidate in ("config.yml", "config.example.yml"):
+        path = _ROOT / candidate
+        if path.exists():
+            return load_runtime_config(path)
+    return {}
+
+
+def effective_config(override: ChatOverride) -> EffectiveConfig:
+    """Baseline + this chat's override, i.e. what the scanner will actually use."""
+    return EffectiveConfig(baseline=load_baseline_config(), override=override)
 
 
 def _resolve_secrets() -> None:
@@ -117,6 +139,32 @@ def _query_df(query: str, params: tuple = ()) -> pd.DataFrame:
     cols = [c[0] for c in cur.description]
     rows = cur.fetchall()
     return pd.DataFrame(rows, columns=cols)
+
+
+@st.cache_data(ttl=60)
+def load_listings(chat_id: Optional[str] = None) -> pd.DataFrame:
+    """Matched listings, optionally scoped to what one chat was notified about.
+
+    ``chat_id=None`` returns everything the scanner ever matched. Passing a
+    chat id joins ``chat_emissions``, which is the per-chat delivery log —
+    two chats with different filters legitimately see different listings, so
+    "what did *this* chat get" is a different question from "what matched".
+    """
+    if chat_id is None:
+        return _query_df(
+            "SELECT key, source, title, url, price, area, score, score_reasons, "
+            "       fuzzy_key, first_seen_at, NULL AS sent_at "
+            "FROM seen WHERE status = 'matched' "
+            "ORDER BY score DESC NULLS LAST, price ASC"
+        )
+    return _query_df(
+        "SELECT s.key, s.source, s.title, s.url, s.price, s.area, s.score, "
+        "       s.score_reasons, s.fuzzy_key, s.first_seen_at, e.sent_at "
+        "FROM chat_emissions e JOIN seen s ON s.key = e.listing_key "
+        "WHERE e.chat_id = ? AND s.status = 'matched' "
+        "ORDER BY s.score DESC NULLS LAST, s.price ASC",
+        (str(chat_id),),
+    )
 
 
 @st.cache_data(ttl=60)

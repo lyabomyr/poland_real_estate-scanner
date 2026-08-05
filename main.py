@@ -30,6 +30,7 @@ from scanner.storage import SeenStore
 from scanner.telegram import (
     discover_chats,
     find_new_chat_memberships,
+    get_chat_title,
     send_greeting,
 )
 
@@ -110,6 +111,8 @@ def main() -> int:
         _bootstrap_from_yaml_if_empty(cfg, repo, log)
 
         # 4) Build one ChatContext per enabled chat and run the pipeline.
+        _resolve_placeholder_titles(bot_token, repo, log)
+
         chats = [c for c in repo.list_enabled() if not c.override.paused]
         if not chats:
             log.info("no active chats — set telegram.chat_id in config.yml or add the bot to a group")
@@ -206,6 +209,32 @@ def _register_chat(chat_id, title, repo: ChatConfigRepo, log: logging.Logger) ->
             "registered chat_id=%s (%s) + backfilled %d historical emissions",
             chat_id, title, n,
         )
+
+
+# Titles we generate ourselves rather than read from Telegram. Worth one
+# getChat call each so the dashboard shows the real chat name.
+_PLACEHOLDER_TITLES = ("fallback (from YAML)", "bootstrap (from YAML)", "(no title)", "")
+
+
+def _resolve_placeholder_titles(
+    bot_token: str,
+    repo: ChatConfigRepo,
+    log: logging.Logger,
+) -> None:
+    """Replace self-generated chat titles with the real ones from Telegram.
+
+    Only touches rows whose title is a known placeholder, so it costs at most
+    one ``getChat`` per such chat and then never again.
+    """
+    if not bot_token or bot_token.startswith("REPLACE"):
+        return
+    for chat in repo.list_all():
+        if (chat.title or "") not in _PLACEHOLDER_TITLES:
+            continue
+        title = get_chat_title(bot_token, chat.chat_id)
+        if title and title != chat.title:
+            repo.upsert(chat.chat_id, title, chat.override, enabled=chat.enabled)
+            log.info("resolved title for chat %s: %r", chat.chat_id, title)
 
 
 def _bootstrap_from_yaml_if_empty(cfg: dict, repo: ChatConfigRepo, log: logging.Logger) -> None:

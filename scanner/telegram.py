@@ -219,6 +219,40 @@ def send_message(
     return True
 
 
+def get_chat_title(bot_token: str, chat_id, timeout: int = 15) -> Optional[str]:
+    """Resolve a chat's human-readable name via ``getChat``.
+
+    Used to replace placeholder titles (e.g. a chat seeded from
+    ``telegram.chat_id`` before the bot ever saw a message there) so the
+    dashboard's chat picker shows real names instead of internal labels.
+
+    Returns ``None`` on any failure — a missing title is cosmetic and must
+    never break a scan.
+    """
+    if not bot_token or bot_token.startswith("REPLACE"):
+        return None
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{bot_token}/getChat",
+            params={"chat_id": chat_id},
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        data = r.json()
+        if not data.get("ok"):
+            return None
+        chat = data.get("result") or {}
+        return (
+            chat.get("title")
+            or chat.get("username")
+            or " ".join(filter(None, [chat.get("first_name"), chat.get("last_name")]))
+            or None
+        )
+    except Exception as e:
+        log.debug("getChat failed for %s: %s", chat_id, e)
+        return None
+
+
 class TelegramNotifier:
     """Thin wrapper around Bot API ``sendMessage``.
 
