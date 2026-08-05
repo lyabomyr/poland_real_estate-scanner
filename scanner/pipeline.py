@@ -132,7 +132,10 @@ class MultiChatPipeline:
             self._emit(ctx, matched)
             sent = self.stats.sent - before_sent
             failed = self.stats.send_failed - before_failed
-            log.info("[%s] delivered %d message(s)", ctx.chat_id, sent)
+            if self.dry_run:
+                log.info("[%s] dry run — nothing sent", ctx.chat_id)
+            else:
+                log.info("[%s] delivered %d message(s)", ctx.chat_id, sent)
             if failed:
                 log.error(
                     "[%s] %d message(s) could NOT be delivered — they stay "
