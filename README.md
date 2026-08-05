@@ -194,7 +194,9 @@ See [`dashboard/README.md`](dashboard/README.md).
 
 ## Local development
 
-Requires [Poetry](https://python-poetry.org/).
+Only Python 3.11+ is needed — dependencies come from
+[`requirements.txt`](requirements.txt), the same file Streamlit Cloud
+installs. `make install` builds a local `.venv` from it.
 
 ```bash
 make install
@@ -259,8 +261,10 @@ variable `DASHBOARD_URL`.
 Minimum checks before calling a change done:
 
 ```bash
-poetry run pyflakes scanner/ main.py tests
-poetry run python -m unittest discover -s tests -v
+make lint                  # pyflakes
+make test                  # unit tests
+make check-dashboard-deps  # requirements.txt covers dashboard imports
+make boot-check            # dashboard boots in a clean venv
 ```
 
 For parser or pipeline changes, also run:

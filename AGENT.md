@@ -101,8 +101,8 @@ source URLs, or scoring weights in command handlers.
 Minimum verification:
 
 ```bash
-poetry run pyflakes scanner/ main.py tests
-poetry run python -m unittest discover -s tests -v
+make lint
+make test
 ```
 
 If you touched parsers, filters, scoring, or delivery flow, also run:

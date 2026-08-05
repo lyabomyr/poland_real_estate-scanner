@@ -15,10 +15,10 @@ dashboard/
 ## Local run
 
 ```bash
-poetry install
+make install
 TURSO_URL=libsql://…turso.io \
 TURSO_AUTH_TOKEN=eyJhbGciOi… \
-  poetry run streamlit run dashboard/app.py
+  make dashboard
 ```
 
 Opens on `http://localhost:8501`.
@@ -79,3 +79,41 @@ Free tier: unlimited public apps. An app with no visitors sleeps after
 Drop a new file into `dashboard/pages/N_🌟_Name.py`. Streamlit picks it up
 automatically on next page reload. Follow the emoji + `_underscore_`
 naming — it becomes the sidebar entry.
+
+## When the deploy hangs
+
+Streamlit Cloud's boot log ends with its own infrastructure steps:
+
+```
+Provisioning machine...
+Preparing system...
+Spinning up manager process...
+Updated app!          <- our code has started by here
+```
+
+If it stalls **at "Spinning up manager process"**, our code has not run yet —
+that step is entirely platform-side. Don't go hunting through the app.
+
+Confirm the app itself is healthy first:
+
+```bash
+make check-dashboard-deps   # requirements.txt is complete
+./scripts/boot_check.sh     # boots app.py in a pristine venv, hits every page
+```
+
+If both pass, the app is fine and the stall is Streamlit's. In order:
+
+1. **Reboot app** (Manage app → ⋮ → Reboot).
+2. If it stalls again, **delete the app and redeploy it**. This clears a stuck
+   container and is the reliable fix; the URL slug is rebuilt from the repo
+   name, so it usually comes back the same.
+3. Check <https://status.streamlit.io>.
+
+Not a cause, despite looking like one:
+
+* **Memory.** Measured 162 MB RSS for pandas + streamlit + plotly against a
+  ~1 GB limit. Don't rip out plotly on suspicion — measure first.
+* **"WARN: More than one requirements file detected."** Streamlit sees both
+  `requirements.txt` and `pyproject.toml`. Both now declare the same
+  dependency set with no compiled packages, so either one produces a working
+  app.

@@ -1,0 +1,4 @@
+# Development-only extras. Runtime deps live in requirements.txt, which is
+# also what Streamlit Cloud installs — keep this file out of that path.
+-r requirements.txt
+pyflakes>=3.4,<4.0

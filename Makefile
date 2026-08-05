@@ -1,16 +1,23 @@
-.PHONY: help install run dry config clean reset-db test
+# Everything runs out of a local .venv built from requirements.txt — the same
+# file Streamlit Cloud installs from. One dependency list, no Poetry layer,
+# and no "more than one requirements file" ambiguity on deploy.
+VENV := .venv
+PY   := $(VENV)/bin/python
+PIP  := $(VENV)/bin/pip
+
+.PHONY: help install run dry config clean reset-db test lint chats prune greet \
+        check-dashboard-deps boot-check
 
 help:
-	@awk 'BEGIN{FS=":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z_-]+:.*##/{printf "  \033[36m%-12s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN{FS=":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z_-]+:.*##/{printf "  \033[36m%-22s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
 
-install:  ## install python deps into poetry venv
-	poetry install --no-root
+$(PY):
+	python3 -m venv $(VENV)
+	$(PIP) install --quiet --upgrade pip
 
-run: config  ## run the scanner (prints matches + sends to Telegram if configured)
-	poetry run python main.py
-
-dry: config  ## dry run — print matches, don't touch DB, don't send Telegram
-	poetry run python main.py --dry-run
+install: $(PY)  ## create .venv and install runtime + dev dependencies
+	$(PIP) install --quiet -r requirements-dev.txt
+	@echo "installed into $(VENV)"
 
 config:
 	@if [ ! -f config.yml ]; then \
@@ -18,27 +25,39 @@ config:
 		echo "created config.yml from example — edit it to add Telegram credentials"; \
 	fi
 
-reset-db:  ## delete the SQLite dedup store
-	rm -f data/seen.db
+run: config  ## run the scanner (prints matches + sends to Telegram if configured)
+	$(PY) main.py
+
+dry: config  ## dry run — print matches, don't touch DB, don't send Telegram
+	$(PY) main.py --dry-run
 
 chats: config  ## list chats the bot has recently seen (for picking chat_id)
-	poetry run python main.py --print-chats
+	$(PY) main.py --print-chats
+
+greet: config  ## announce chat_id in every chat the bot has newly joined
+	$(PY) main.py --greet-chats
 
 prune: config  ## archive + delete rejected rows older than storage.prune_rejected_days
-	poetry run python main.py --prune
+	$(PY) main.py --prune
+
+dashboard: config  ## run the Streamlit dashboard locally on :8501
+	$(VENV)/bin/streamlit run dashboard/app.py
+
+reset-db:  ## delete the local SQLite dedup store
+	rm -f data/seen.db
+
+lint:  ## static-check for unused imports / undefined names
+	$(PY) -m pyflakes scanner/ main.py tests dashboard
+
+test:  ## run unit tests
+	$(PY) -m unittest discover -s tests -v
 
 check-dashboard-deps:  ## verify requirements.txt covers every dashboard import
 	./scripts/check_dashboard_deps.sh
 
-lint:  ## static-check for unused imports / undefined names
-	poetry run pyflakes scanner/ main.py tests
+boot-check:  ## boot the dashboard in a clean venv and hit every page
+	./scripts/boot_check.sh
 
-test:  ## run unit tests
-	poetry run python -m unittest discover -s tests -v
-
-greet: config  ## announce chat_id in every chat the bot has newly joined
-	poetry run python main.py --greet-chats
-
-clean:  ## remove caches and virtualenv
+clean:  ## remove caches and the virtualenv
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
-	poetry env remove --all 2>/dev/null || true
+	rm -rf $(VENV)
