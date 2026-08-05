@@ -13,7 +13,6 @@ CLI shape::
 """
 
 import argparse
-import json
 import logging
 import sys
 from pathlib import Path
@@ -22,7 +21,7 @@ from typing import Optional
 from scanner.chat_repo import ChatConfigRepo
 from scanner.commands import CommandRouter
 from scanner.pipeline import MultiChatPipeline, build_chat_context
-from scanner.runtime_config import load_runtime_config, runtime_has_webhook
+from scanner.runtime_config import load_runtime_config
 from scanner.sources.komornik import KomornikSource
 from scanner.sources.morizon import MorizonSource
 from scanner.sources.olx import OlxSource
@@ -57,8 +56,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="archive + delete rejected rows older than storage.prune_rejected_days")
     p.add_argument("--greet-chats", action="store_true",
                    help="announce chat_id in newly-joined chats, then exit")
-    p.add_argument("--stats-json",
-                   help="write final run stats JSON to this path")
     return p
 
 
@@ -91,19 +88,20 @@ def main() -> int:
     storage_cfg = cfg.get("storage") or {}
     with SeenStore(storage_cfg.get("db_path", "./data/seen.db")) as store:
         repo = ChatConfigRepo(store)
-        webhook_enabled = runtime_has_webhook(cfg)
 
-        # 1) Greet newly-joined chats + auto-bootstrap chat_configs rows.
+        # 1) Greet newly-joined chats + auto-register them as scan targets.
         dashboard_url: Optional[str] = (
             (cfg.get("notifications") or {}).get("dashboard_url") or None
         )
-        if not webhook_enabled and (not args.dry_run or args.greet_chats):
+        if not args.dry_run or args.greet_chats:
             _greet_new_chats(bot_token, store, repo, log, dashboard_url=dashboard_url)
         if args.greet_chats:
             return 0
 
-        # 2) Process pending Telegram commands (writes chat_configs overrides).
-        if not webhook_enabled and not args.dry_run:
+        # 2) Drain pending Telegram commands. This is the *only* place commands
+        #    are read, which is why a reply can take up to one scan interval
+        #    (15 min on the default cron) — see scanner.commands.
+        if not args.dry_run:
             handled = CommandRouter(bot_token, repo, cfg).process_pending()
             if handled:
                 log.info("commands: processed %d update(s)", handled)
@@ -115,7 +113,6 @@ def main() -> int:
         chats = [c for c in repo.list_enabled() if not c.override.paused]
         if not chats:
             log.info("no active chats — set telegram.chat_id in config.yml or add the bot to a group")
-            _write_stats_json(args.stats_json, {"seen": 0, "already_seen": 0, "rejected": 0, "matched": 0, "cross_dup": 0, "sent": 0})
             return 0
 
         contexts = [
@@ -124,7 +121,6 @@ def main() -> int:
         stats = MultiChatPipeline(contexts, store, repo, dry_run=args.dry_run).run()
 
     log.info("done: %s", stats.as_dict())
-    _write_stats_json(args.stats_json, stats.as_dict())
     return 0
 
 
@@ -258,14 +254,6 @@ def _bootstrap_from_yaml_if_empty(cfg: dict, repo: ChatConfigRepo, log: logging.
         "fallback: chat_id=%s reactivated from YAML (%s)",
         chat_id, ", ".join(changed) or "already active",
     )
-
-
-def _write_stats_json(path: Optional[str], stats: dict) -> None:
-    if not path:
-        return
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(stats, ensure_ascii=False, sort_keys=True), encoding="utf-8")
 
 
 if __name__ == "__main__":

@@ -1,30 +1,16 @@
 name: scan
 
+# The scanner's only trigger. Each run does two things:
+#   1. drains pending Telegram commands via getUpdates
+#   2. scans every enabled chat's sources and sends new matches
+#
+# Because commands are only read here, a bot reply can take up to one
+# interval (15 min). That's the schedule, not slow code — the /help text
+# says so explicitly. Use "Run workflow" for an immediate run.
 on:
   schedule:
-    - cron: "*/15 * * * *"   # every 15 minutes (GitHub may delay by 5-15 min in peak hours)
+    - cron: "*/15 * * * *"   # GitHub may delay by 5-15 min in peak hours
   workflow_dispatch:
-    inputs:
-      trigger_command:
-        description: "Telegram command that triggered this run"
-        required: false
-        type: string
-      trigger_chat_id:
-        description: "Telegram chat ID to reply to when the run finishes"
-        required: false
-        type: string
-      trigger_chat_title:
-        description: "Human-readable Telegram chat title"
-        required: false
-        type: string
-      trigger_user_id:
-        description: "Telegram user ID who requested the run"
-        required: false
-        type: string
-      trigger_user_name:
-        description: "Telegram username/name who requested the run"
-        required: false
-        type: string
 
 concurrency:
   group: scan
@@ -33,7 +19,7 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -55,27 +41,16 @@ jobs:
         run: poetry install --no-interaction --no-root
 
       - name: Run scanner
-        # TURSO_URL + TURSO_AUTH_TOKEN switch the store to hosted libSQL —
-        # nothing to commit back after the run because the cloud DB persists
-        # everything. Unset them if you want the workflow to use a local
-        # SQLite file committed to the repo instead.
+        # TURSO_* point the store at hosted libSQL, so there is no state to
+        # commit back after the run. Drop them to fall back to a local
+        # SQLite file instead.
+        #
+        # TG_CHAT_ID is optional: chats self-register when the bot is added
+        # to them. It only acts as a fallback when no chat is registered yet.
         env:
-          TG_BOT_TOKEN:      ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID:        ${{ secrets.TG_CHAT_ID }}
-          TG_WEBHOOK_ENABLED: ${{ vars.TG_WEBHOOK_ENABLED }}
-          DASHBOARD_URL:     ${{ vars.DASHBOARD_URL }}
+          TG_BOT_TOKEN:     ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID:       ${{ secrets.TG_CHAT_ID }}
+          DASHBOARD_URL:    ${{ vars.DASHBOARD_URL }}
           TURSO_URL:        ${{ secrets.TURSO_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
-        run: poetry run python main.py --config config.example.yml --stats-json .tmp/scan-stats.json
-
-      - name: Send Telegram summary for workflow-dispatched scan
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && github.event.inputs.trigger_chat_id != '' && github.event.inputs.trigger_command != '' }}
-        env:
-          TG_BOT_TOKEN:   ${{ secrets.TG_BOT_TOKEN }}
-          SCAN_JOB_STATUS: ${{ job.status }}
-        run: >
-          poetry run python scripts/send_scan_summary.py
-          --chat-id "${{ github.event.inputs.trigger_chat_id }}"
-          --stats-json .tmp/scan-stats.json
-          --command "${{ github.event.inputs.trigger_command }}"
-          --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        run: poetry run python main.py --config config.example.yml

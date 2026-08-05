@@ -13,19 +13,21 @@ The scanner is correct only if all of this stays true:
 - dedup still works across same-source, cross-source, and grouped bulk listings
 - Telegram commands reflect the **same effective runtime config** the scanner
   uses
-- webhook mode and polling fallback never conflict (`getUpdates` must stay off
-  in production when `TG_WEBHOOK_ENABLED=true`)
+- command replies are honest about latency: they arrive within one scan
+  interval (15 min), and `/help` + the greeting say so
 
 ## Current architecture
 
-Three runtime paths matter:
+Two runtime paths matter:
 
-1. **GitHub Actions scanner**
-   `main.py -> pipeline -> sources -> filters -> dedup -> scoring -> Telegram`
-2. **Vercel webhook endpoint**
-   `api/telegram_webhook.py -> scanner/webhook.py -> CommandRouter`
-3. **Streamlit dashboard**
-   reads Turso and edits `chat_configs`
+1. **GitHub Actions scanner** (every 15 min) — one run does both jobs:
+   `main.py -> getUpdates (CommandRouter) -> pipeline -> sources -> filters -> dedup -> scoring -> Telegram`
+2. **Streamlit dashboard** — reads Turso and edits `chat_configs`
+
+There is deliberately **no always-on server**. Commands are polled once per
+run, which is why replies take up to 15 minutes. That trade-off is the whole
+reason the project costs nothing to operate — do not "fix" it by adding a
+hosted webhook without being asked.
 
 Shared state lives in Turso/SQLite:
 
@@ -39,9 +41,6 @@ Shared state lives in Turso/SQLite:
 
 ```text
 main.py
-api/telegram_webhook.py
-scripts/manage_telegram_webhook.py
-scripts/send_scan_summary.py
 scanner/
   chat_config.py
   chat_repo.py
@@ -51,7 +50,6 @@ scanner/
   runtime_config.py
   storage.py
   telegram.py
-  webhook.py
   sources/
     otodom.py
     olx.py
@@ -84,12 +82,13 @@ The scanner is per-chat, not per-run-global:
 
 ### Telegram commands
 
-`CommandRouter` is shared by:
+`CommandRouter.process_pending()` drains `getUpdates` once per scan run and
+delegates each update to `process_update()`. Keep that split — `process_update`
+takes a single update dict, which is what makes the router testable without
+network access.
 
-- local polling fallback via `process_pending()`
-- production webhook via `process_update()`
-
-Do not fork the command logic into separate implementations.
+Each `update_id` is claimed via `repo.claim_update()` *before* dispatch, so a
+command can never run twice even if a run is retried.
 
 ### `/config`, `/urls`, `/decision_tree`
 
@@ -97,21 +96,12 @@ These commands must stay generated from the same effective config and rule
 model as the scanner. Do not hardcode a second copy of thresholds, keywords,
 source URLs, or scoring weights in command handlers.
 
-### `/scan`
-
-`/scan` must:
-
-- acknowledge immediately
-- dispatch GitHub Actions via `workflow_dispatch`
-- stay protected against arbitrary chats/users
-- send a completion summary back to Telegram
-
 ## Running and verifying
 
 Minimum verification:
 
 ```bash
-poetry run pyflakes scanner/ main.py api scripts tests
+poetry run pyflakes scanner/ main.py tests
 poetry run python -m unittest discover -s tests -v
 ```
 
@@ -136,30 +126,25 @@ workflow rendering, startup, or bot replies.
 
 ## Deployment discipline
 
-Production scanner:
+Everything runs on free tiers:
 
-- GitHub Actions cron/manual dispatch
-
-Production command path:
-
-- Vercel webhook endpoint
-
-Dashboard:
-
-- Streamlit Community Cloud
+- scanner + command polling: GitHub Actions cron (or manual dispatch)
+- state: Turso free tier
+- dashboard: Streamlit Community Cloud
 
 Do not silently reintroduce:
 
-- a paid always-on server
-- production `getUpdates` polling alongside webhook mode
-- BZP as an active source
+- a paid or always-on server (Vercel/Cloudflare/VPS) — this was tried and
+  removed on purpose; the 15-minute reply latency is accepted
+- BZP as an active source — it is a public-procurement board, not a sales
+  listing site, and produced ~1 irrelevant hit per month
 
 ## Safety checks before saying done
 
 - no BZP references left in active code/docs/config unless they are clearly
   historical
-- webhook secret validation still works
 - duplicate `update_id` handling still works
+- `/help` and the greeting still state the up-to-15-minute reply latency
 - reply keyboard still contains `/dashboard`, `/config`, `/decision_tree`,
   `/urls`
 - long Telegram replies still stay under the 4096-char limit via chunking

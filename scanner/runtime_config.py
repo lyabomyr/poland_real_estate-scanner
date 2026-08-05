@@ -58,8 +58,6 @@ def apply_env_overrides(
         tg["chat_id"] = env_map.get("TG_CHAT_ID", "").strip()
     if _env_value(env_map, "TG_PARSE_MODE"):
         tg["parse_mode"] = env_map["TG_PARSE_MODE"].strip()
-    if "TG_WEBHOOK_ENABLED" in env_map:
-        tg["webhook_enabled"] = _parse_bool(env_map.get("TG_WEBHOOK_ENABLED"))
 
     notifications = out.setdefault("notifications", {})
     if "DASHBOARD_URL" in env_map:
@@ -81,17 +79,6 @@ def normalize_config(cfg: dict) -> dict:
     return cfg
 
 
-def runtime_has_webhook(cfg: dict, *, env: Optional[Mapping[str, str]] = None) -> bool:
-    env_map: Mapping[str, str] = os.environ if env is None else env
-    if "TG_WEBHOOK_ENABLED" in env_map:
-        return _parse_bool(env_map.get("TG_WEBHOOK_ENABLED"))
-    return bool((cfg.get("telegram") or {}).get("webhook_enabled"))
-
-
 def _env_value(env: Mapping[str, str], key: str) -> bool:
     value = env.get(key)
     return bool(value and value.strip())
-
-
-def _parse_bool(value: str | None) -> bool:
-    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}

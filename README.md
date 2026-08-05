@@ -1,14 +1,19 @@
 # Poland real-estate scanner
 
-Scanner for buying apartments in Kraków under a fixed budget. The project is
-split into three runtime pieces:
+Scanner for buying apartments in Kraków under a fixed budget. Two runtime
+pieces:
 
-1. **GitHub Actions scanner** runs every 15 minutes and sends fresh matches.
-2. **Vercel webhook endpoint** handles Telegram commands immediately.
-3. **Streamlit dashboard** provides a read-only analytics view plus per-chat
-   override editing.
+1. **GitHub Actions scanner** — runs every 15 minutes. Each run sends fresh
+   matches *and* answers any Telegram commands received since the last run.
+2. **Streamlit dashboard** — read-only analytics plus per-chat override
+   editing.
 
 State lives in **Turso/libSQL**. Local development falls back to SQLite.
+
+> ⏱ **Bot replies take up to 15 minutes.** Commands are read by the scheduled
+> scan, not by an always-on server, so a message sent at 12:01 is answered by
+> the run that starts at 12:15. Nothing is lost — it just isn't instant. Hit
+> **Actions → scan → Run workflow** when you want an immediate answer.
 
 ## Current architecture
 
@@ -23,37 +28,18 @@ State lives in **Turso/libSQL**. Local development falls back to SQLite.
 
 ### Telegram command path
 
-`Telegram webhook -> Vercel Function -> webhook secret validation -> Turso-backed command handling -> immediate Telegram reply`
+`GitHub Actions cron -> main.py -> getUpdates -> Turso-backed command handling -> Telegram reply`
 
-- Read-only commands reply immediately: `/help`, `/status`, `/config`,
-  `/urls`, `/decision_tree`, `/dashboard`, `/stats`
-- Mutating commands update `chat_configs` immediately: `/max_price`,
-  `/min_area`, `/max_area`, `/min_year`, `/source`, `/kw`, `/pause`,
-  `/resume`, `/reset`
-- `/scan` replies immediately, triggers `scan.yml` via GitHub Actions
-  `workflow_dispatch`, then sends a completion summary back to Telegram
+Commands ride the same 15-minute run as the scan:
 
-### Why Vercel, not Cloudflare Workers
+- Read-only: `/help`, `/status`, `/config`, `/urls`, `/decision_tree`,
+  `/dashboard`, `/stats`
+- Mutating: `/max_price`, `/min_area`, `/max_area`, `/min_year`, `/source`,
+  `/kw`, `/pause`, `/resume`, `/reset`
 
-Cloudflare Workers Free was the original preference, but the repo’s hard
-requirement is that `/config` and `/decision_tree` reflect the **same Python
-effective-config and rule logic** as the scanner. Reusing the Python code in a
-Vercel Function is lower-risk than maintaining a second JS implementation of
-the config merge, filter tree, scoring model, redaction, and command parsing.
-
-Expected latency:
-
-- Warm webhook responses: usually sub-second
-- Cold starts: low single-digit seconds
-- `/scan` acknowledgement: immediate; the actual scan still depends on GitHub
-  Actions queue + runtime
-
-Official references used for this setup:
-
-- [Telegram Bot API](https://core.telegram.org/bots/api?source=post_page)
-- [GitHub workflow dispatch REST API](https://docs.github.com/en/rest/actions/workflows?apiVersion=2022-11-28+)
-- [Vercel Python Functions](https://vercel.com/docs/functions/runtimes/python)
-- [Vercel Hobby plan](https://vercel.com/docs/plans/hobby)
+Each `update_id` is claimed in `command_updates` before dispatch, so a command
+is never executed twice. Mutations land in `chat_configs` in the same run that
+answers them — so the scan you're waiting on already applies the new setting.
 
 ## Defaults and filters
 
@@ -105,7 +91,6 @@ Current command surface:
 - `/decision_tree`
 - `/dashboard`
 - `/stats [N]`
-- `/scan`
 - `/max_price N`
 - `/min_area N`
 - `/max_area N`
@@ -181,12 +166,9 @@ make chats
 make greet
 ```
 
-Notes:
-
-- `make chats` and `make greet` use `getUpdates`, so they only work when no
-  webhook is configured on the bot
-- local polling mode is for development; production should set
-  `TG_WEBHOOK_ENABLED=true`
+Note: `make chats` and `make greet` read `getUpdates`, the same channel the
+scanner drains. Running them locally consumes updates the next scheduled scan
+would otherwise have processed.
 
 ## Deployment
 
@@ -194,9 +176,8 @@ Notes:
 
 [`scan.yml`](.github/workflows/scan.yml) runs:
 
-- every 15 minutes on cron
-- manually from the Actions UI
-- from Telegram `/scan` via `workflow_dispatch`
+- every 15 minutes on cron (GitHub may delay by 5-15 min at peak)
+- manually from the Actions UI — use this for an immediate scan/reply
 
 [`prune.yml`](.github/workflows/prune.yml) runs monthly and archives old
 rejected rows.
@@ -219,111 +200,6 @@ Repository variables recommended for GitHub Actions:
 | Variable | Required | Purpose |
 |---|---|---|
 | `DASHBOARD_URL` | optional | public Streamlit URL surfaced by the bot |
-| `TG_WEBHOOK_ENABLED` | yes in production | tells the scanner to skip `getUpdates` polling |
-
-### Vercel environment variables
-
-Set these on the Vercel project that serves `api/telegram_webhook.py`:
-
-| Variable | Required | Purpose |
-|---|---|---|
-| `TG_BOT_TOKEN` | yes | same bot token |
-| `TG_WEBHOOK_SECRET` | yes | Telegram webhook secret token |
-| `TG_WEBHOOK_ENABLED` | yes | set to `true` |
-| `TURSO_URL` | yes | same Turso URL |
-| `TURSO_AUTH_TOKEN` | yes | same Turso token |
-| `DASHBOARD_URL` | optional | public Streamlit URL |
-| `TG_CHAT_ID` | optional | fallback bootstrap chat |
-| `TG_WORKFLOW_ALLOWED_CHAT_IDS` | optional | tighten `/scan` to these chat IDs only. Unset = every registered chat may dispatch (see below) |
-| `TG_WORKFLOW_ALLOWED_USER_IDS` | optional | comma-separated Telegram user IDs additionally allowed to dispatch `/scan` |
-| `TG_SCAN_COOLDOWN_SECONDS` | optional | `/scan` throttle window; overrides `notifications.scan_cooldown_seconds` |
-| `TG_SCAN_MAX_PER_WINDOW` | optional | max forced scans per window; `0` disables throttling |
-
-### Who may run `/scan`
-
-Chats **self-register** when the bot is added, so there is no allowlist to
-maintain by hand. Authorization has three layers:
-
-1. **Chat gate** — by default any chat present and `enabled` in
-   `chat_configs` may dispatch. Setting `TG_WORKFLOW_ALLOWED_CHAT_IDS`
-   switches to restricted mode: only the listed IDs may dispatch, even if
-   other chats are registered. Use restricted mode if the bot lives in
-   groups you don't fully control.
-2. **Admin gate** — in groups/supergroups the requester must be an
-   administrator or creator. If Telegram can't confirm that (network error,
-   rate limit, bot removed), the check **fails closed** and denies.
-3. **Throttle** — at most `scan_max_per_window` dispatches per
-   `scan_cooldown_seconds`, counted **globally** because the GitHub Actions
-   queue is one shared resource. Defaults: 3 per 10 minutes. The scheduled
-   15-minute scan is unaffected; the throttle only limits *forced* runs.
-
-Every dispatch is logged to the `scan_dispatches` table (chat, user,
-timestamp) for auditing.
-| `GITHUB_REPOSITORY_OWNER` | yes for `/scan` | repo owner |
-| `GITHUB_REPOSITORY_NAME` | yes for `/scan` | repo name |
-| `GITHUB_SCAN_WORKFLOW_FILE` | yes for `/scan` | usually `scan.yml` |
-| `GITHUB_SCAN_WORKFLOW_REF` | yes for `/scan` | usually `main` |
-| `GITHUB_WORKFLOW_TOKEN` | yes for `/scan` | token that can call workflow dispatch |
-
-### GitHub token for `/scan`
-
-Minimum required permission for the token used by the webhook endpoint:
-
-- **Actions: write**
-
-Per GitHub’s current REST docs, a fine-grained token with `Actions: write`
-is sufficient for creating a workflow dispatch. Keep the token scoped to this
-repository only.
-
-### Vercel deploy steps
-
-1. Import the repository into Vercel.
-2. Keep the repo root as the project root.
-3. Set all Vercel env vars listed above.
-4. Deploy.
-5. Note the production URL, e.g. `https://your-project.vercel.app`.
-
-#### How the function gets its dependencies
-
-Vercel's Python runtime installs from **`requirements.txt`** at the repo
-root — it does *not* read `pyproject.toml` or `poetry.lock`. That file is
-deliberately minimal (`requests`, `PyYAML`, `libsql-experimental`) because
-the webhook only needs to talk to Telegram, read `config.example.yml`, and
-reach Turso.
-
-`beautifulsoup4` (scanner-only) and `streamlit` / `pandas` / `plotly`
-(dashboard-only) are intentionally excluded — shipping them would add
-~120 MB to the function bundle and slow every cold start.
-
-**If you add a dependency that the webhook path needs, add it to both
-`pyproject.toml` and `requirements.txt`.** The scanner on GitHub Actions
-and the dashboard on Streamlit Cloud keep using Poetry / `pyproject.toml`.
-
-### Telegram webhook setup
-
-Use the helper script:
-
-```bash
-export TG_BOT_TOKEN="123456:ABC"
-export TG_WEBHOOK_SECRET="your-secret-token"
-
-poetry run python scripts/manage_telegram_webhook.py set \
-  --url "https://your-project.vercel.app/api/telegram_webhook" \
-  --secret "$TG_WEBHOOK_SECRET" \
-  --drop-pending-updates
-```
-
-Inspect status:
-
-```bash
-poetry run python scripts/manage_telegram_webhook.py info
-```
-
-Delete webhook and go back to polling:
-
-```bash
-poetry run python scripts/manage_telegram_webhook.py delete --drop-pending-updates
-```
 
 ## Streamlit deployment
 
@@ -333,17 +209,15 @@ Community Cloud and set:
 - `TURSO_URL`
 - `TURSO_AUTH_TOKEN`
 
-After the app is live, copy its final public URL into:
-
-- GitHub Actions variable `DASHBOARD_URL`
-- Vercel env var `DASHBOARD_URL`
+After the app is live, copy its final public URL into the GitHub Actions
+variable `DASHBOARD_URL`.
 
 ## Verification checklist
 
 Minimum checks before calling a change done:
 
 ```bash
-poetry run pyflakes scanner/ main.py api scripts tests
+poetry run pyflakes scanner/ main.py tests
 poetry run python -m unittest discover -s tests -v
 ```
 
@@ -356,25 +230,18 @@ make dry
 ## Files at a glance
 
 ```text
-main.py
-api/telegram_webhook.py
-scripts/manage_telegram_webhook.py
-scripts/send_scan_summary.py
-.github/workflows/scan.yml
-.github/workflows/prune.yml
-dashboard/
+main.py                        CLI + wiring
+.github/workflows/scan.yml     cron: scan + drain commands (every 15 min)
+.github/workflows/prune.yml    cron: archive old rejected rows (monthly)
+dashboard/                     Streamlit app
 scanner/
-  chat_config.py
-  chat_repo.py
-  commands.py
-  introspection.py
-  pipeline.py
-  runtime_config.py
-  telegram.py
-  webhook.py
+  chat_config.py               per-chat overrides + effective config merge
+  chat_repo.py                 chat_configs / chat_emissions CRUD
+  commands.py                  Telegram command routing (polled)
+  introspection.py             /config, /urls, /decision_tree reports
+  pipeline.py                  MultiChatPipeline
+  runtime_config.py            YAML load + env overrides
+  telegram.py                  Bot API client, keyboard, greeting
   sources/
-    otodom.py
-    olx.py
-    morizon.py
-    komornik.py
+    otodom.py  olx.py  morizon.py  komornik.py
 ```

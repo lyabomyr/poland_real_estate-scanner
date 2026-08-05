@@ -35,6 +35,9 @@ def default_reply_keyboard() -> dict:
     recognises them in the ``getUpdates`` payload with zero extra parsing.
     `is_persistent: true` (Bot API 6.4+) keeps the keyboard open by default
     instead of hiding it behind the tiny "keyboard" icon.
+
+    Tapping a button is not instant: commands are drained by the scheduled
+    scan, so the answer arrives within one interval (15 min by default).
     """
     return {
         "keyboard": [
@@ -113,9 +116,12 @@ def send_greeting(
     text = (
         "👋 <b>Kraków flats scanner</b> is here."
         f"{title_line}\n\n"
-        f"Chat ID: <code>{chat_id}</code>"
-        "\nThis chat is already auto-registered. "
-        "Use <code>TG_CHAT_ID</code> only as an optional fallback bootstrap."
+        f"Chat ID: <code>{chat_id}</code>\n"
+        "This chat is registered — new matches will start arriving here.\n\n"
+        "⏱ <b>Commands take up to 15 minutes.</b>\n"
+        "The bot reads them during its scheduled scan, which runs every "
+        "15 min, so your message waits for the next run. Send /help for "
+        "the command list."
         f"{dashboard_line}"
     )
     try:
@@ -211,25 +217,6 @@ def send_message(
     )
     r.raise_for_status()
     return True
-
-
-def get_chat_member_status(
-    bot_token: str,
-    chat_id,
-    user_id: int,
-    timeout: int = 15,
-) -> Optional[str]:
-    r = requests.get(
-        f"https://api.telegram.org/bot{bot_token}/getChatMember",
-        params={"chat_id": chat_id, "user_id": user_id},
-        timeout=timeout,
-    )
-    r.raise_for_status()
-    data = r.json()
-    if not data.get("ok"):
-        return None
-    result = data.get("result") or {}
-    return (result.get("status") or "").strip().lower() or None
 
 
 class TelegramNotifier:

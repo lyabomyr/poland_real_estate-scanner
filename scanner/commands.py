@@ -1,9 +1,17 @@
 """Telegram command routing.
 
-The command layer is shared by the polling fallback (local dev) and the
-webhook endpoint (production serverless). Every command works against the
-same Turso-backed chat config rows, so Telegram, GitHub Actions and the
-Streamlit UI all see the same effective runtime state.
+Commands are read by **polling**: the scanner calls ``getUpdates`` once per
+run, so a command sent at 12:01 is answered by the run that starts at 12:15.
+Replies therefore take **up to 15 minutes** — that is the scheduling
+interval, not slow code. Users are told this in :meth:`CommandRouter._cmd_help`
+and in the greeting, because otherwise a silent bot looks broken.
+
+Mutations (``/max_price``, ``/kw``, ``/source`` …) land in ``chat_configs``
+in the same run that answers them, so the very same scan already applies the
+new setting.
+
+Every command works against the same Turso-backed rows that the scanner and
+the Streamlit dashboard read, so all three always agree on effective state.
 """
 
 from __future__ import annotations
@@ -17,7 +25,6 @@ import requests
 
 from .chat_config import ChatOverride, EffectiveConfig
 from .chat_repo import ChatConfigRepo
-from .github_actions import GitHubWorkflowDispatcher
 from .introspection import (
     dashboard_url_from_cfg,
     format_config_report,
@@ -26,7 +33,7 @@ from .introspection import (
     number_chunks,
     split_telegram_text,
 )
-from .telegram import default_reply_keyboard, get_chat_member_status, send_message
+from .telegram import default_reply_keyboard, send_message
 
 log = logging.getLogger(__name__)
 
@@ -74,7 +81,6 @@ class CommandRouter:
             "urls": self._cmd_urls,
             "decision_tree": self._cmd_decision_tree,
             "dashboard": lambda a, o, c: self._cmd_dashboard(),
-            "scan": self._cmd_scan,
             "max_price": lambda a, o, c: self._set_int(a, o, "max_price"),
             "min_area": lambda a, o, c: self._set_float(a, o, "min_area"),
             "max_area": lambda a, o, c: self._set_float(a, o, "max_area"),
@@ -164,13 +170,17 @@ class CommandRouter:
 
     def _cmd_help(self) -> List[BotReply]:
         lines = [
+            "⏱ <b>Replies take up to 15 minutes.</b>",
+            "The bot reads commands during its scheduled scan, which runs "
+            "every 15 min — so your message waits for the next run. Nothing "
+            "is lost, it just isn't instant.",
+            "",
             "<b>Commands</b>",
             "/status — short summary for this chat",
             "/config — full effective runtime config (chunked if long)",
             "/urls — public runtime URLs",
             "/decision_tree — current accept/reject/notify logic",
             "/dashboard — link to the Streamlit dashboard",
-            "/scan — queue an immediate GitHub Actions scan",
             "/max_price N — override max price (PLN)",
             "/min_area N — override min area (m²)",
             "/max_area N — set an upper area cap",
@@ -257,52 +267,6 @@ class CommandRouter:
             format_decision_tree(self.baseline_cfg, override),
             title="/decision_tree",
         )
-
-    def _cmd_scan(self, args, override: ChatOverride, ctx: CommandContext) -> List[BotReply]:
-        denied = self._scan_permission_error(ctx)
-        if denied:
-            return [BotReply(denied, parse_mode=None)]
-
-        throttled = self._scan_cooldown_error()
-        if throttled:
-            return [BotReply(throttled, parse_mode=None)]
-
-        dispatcher = GitHubWorkflowDispatcher.from_env(env=self.env)
-        if dispatcher is None:
-            return [
-                BotReply(
-                    "Scanner dispatch is not configured.\n\n"
-                    "Missing one of: GITHUB_WORKFLOW_TOKEN, "
-                    "GITHUB_REPOSITORY_OWNER, GITHUB_REPOSITORY_NAME, "
-                    "GITHUB_SCAN_WORKFLOW_FILE, GITHUB_SCAN_WORKFLOW_REF.",
-                    parse_mode=None,
-                )
-            ]
-        try:
-            result = dispatcher.dispatch_scan(
-                trigger_chat_id=ctx.chat_id,
-                trigger_chat_title=ctx.chat_title,
-                trigger_user_id=ctx.user_id,
-                trigger_user_name=ctx.user_name,
-                command="scan",
-            )
-        except Exception as e:
-            # A misconfigured / expired GITHUB_WORKFLOW_TOKEN is by far the
-            # likeliest failure here, and the raw requests traceback tells the
-            # user nothing actionable. Map the HTTP status to a real fix.
-            log.error("scan dispatch failed for chat=%s: %s", ctx.chat_id, e)
-            return [BotReply(_dispatch_error_hint(e), parse_mode=None)]
-
-        self.repo.record_scan_dispatch(ctx.chat_id, ctx.user_id)
-        lines = [
-            "Scan queued.",
-            "The GitHub Actions run will send a Telegram summary here when it finishes.",
-        ]
-        if result.workflow_run_id:
-            lines.append(f"workflow_run_id: {result.workflow_run_id}")
-        if result.html_url:
-            lines.append(result.html_url)
-        return [BotReply("\n".join(lines), parse_mode=None)]
 
     def _set_int(self, args, override: ChatOverride, attr: str) -> List[BotReply]:
         if not args:
@@ -422,105 +386,6 @@ class CommandRouter:
     def _dashboard_url(self) -> Optional[str]:
         return dashboard_url_from_cfg(self.baseline_cfg)
 
-    def _scan_permission_error(self, ctx: CommandContext) -> Optional[str]:
-        """Authorize a ``/scan`` dispatch. Returns an error string, or None to allow.
-
-        Chat gate — two modes:
-
-        * **Auto (default)**: any chat registered and enabled in
-          ``chat_configs`` may dispatch. Chats self-register when the bot is
-          added, so there is nothing to configure by hand. Combined with the
-          admin check below, this means "an admin of a chat the bot serves".
-        * **Restricted**: set ``TG_WORKFLOW_ALLOWED_CHAT_IDS`` to a
-          comma-separated list and *only* those chats may dispatch, even if
-          other chats are registered. Use this if the bot lives in groups you
-          don't fully control.
-
-        Additional gates (both modes): optional ``TG_WORKFLOW_ALLOWED_USER_IDS``
-        allowlist, and — in groups/supergroups — the requester must be a chat
-        administrator or creator.
-        """
-        explicit_allowlist = self._parse_csv_ids(
-            self.env.get("TG_WORKFLOW_ALLOWED_CHAT_IDS", "")
-        )
-        if explicit_allowlist:
-            if ctx.chat_id not in explicit_allowlist:
-                return (
-                    "This chat is not in TG_WORKFLOW_ALLOWED_CHAT_IDS, so /scan is "
-                    "disabled here.\n\n"
-                    "Remove that variable to allow every registered chat, or add "
-                    f"<code>{ctx.chat_id}</code> to it."
-                )
-        else:
-            # Auto mode — registered + enabled is the allowlist.
-            row = self.repo.get(ctx.chat_id)
-            if row is None or not row.enabled:
-                return (
-                    "This chat is not registered as a scan target yet, so /scan is "
-                    "unavailable.\n\n"
-                    "Re-add the bot to this chat (it self-registers), or enable the "
-                    "chat in the dashboard."
-                )
-
-        allowed_users = self._parse_csv_ids(self.env.get("TG_WORKFLOW_ALLOWED_USER_IDS", ""))
-        if allowed_users and (ctx.user_id is None or str(ctx.user_id) not in allowed_users):
-            return "Your Telegram user is not allowed to dispatch scanner workflows from this bot."
-
-        if ctx.chat_type in {"group", "supergroup"}:
-            if ctx.user_id is None:
-                return "Scanner workflows can only be started by a chat administrator."
-            # Authorization check — fail *closed*. A transient Telegram error
-            # (network blip, 429, bot removed from the chat) must deny the
-            # dispatch rather than bubble up as a generic "/scan failed"
-            # traceback or, worse, be mistaken for a pass.
-            try:
-                status = get_chat_member_status(self.bot_token, ctx.chat_id, ctx.user_id)
-            except Exception as e:
-                log.warning(
-                    "scan auth: getChatMember failed for chat=%s user=%s: %s",
-                    ctx.chat_id, ctx.user_id, e,
-                )
-                return (
-                    "Could not verify your admin status with Telegram, so /scan was "
-                    "not dispatched. Check that the bot is still in this chat, then retry."
-                )
-            if status not in {"administrator", "creator"}:
-                return "Only chat administrators may run /scan."
-        return None
-
-    def _scan_cooldown_error(self) -> Optional[str]:
-        """Global throttle for ``/scan``. Returns an error string, or None to allow.
-
-        Needed because chat authorization is automatic: every chat the bot is
-        added to can dispatch, so without a cap a single group could queue
-        dozens of GitHub Actions runs. Window/limit come from
-        ``notifications.scan_cooldown_seconds`` / ``scan_max_per_window``
-        (env: ``TG_SCAN_COOLDOWN_SECONDS`` / ``TG_SCAN_MAX_PER_WINDOW``).
-
-        Set the limit to 0 to disable throttling entirely.
-        """
-        notif = self.baseline_cfg.get("notifications") or {}
-        window = int(
-            self.env.get("TG_SCAN_COOLDOWN_SECONDS")
-            or notif.get("scan_cooldown_seconds", 600)
-        )
-        limit = int(
-            self.env.get("TG_SCAN_MAX_PER_WINDOW")
-            or notif.get("scan_max_per_window", 3)
-        )
-        if limit <= 0 or window <= 0:
-            return None
-        recent = self.repo.recent_scan_dispatch_count(window)
-        if recent < limit:
-            return None
-        minutes = max(1, window // 60)
-        return (
-            f"Scan throttled: {recent} scans were already dispatched in the last "
-            f"{minutes} min (limit {limit}).\n\n"
-            "The scheduled scan keeps running every 15 min regardless — /scan is "
-            "only for forcing an early run."
-        )
-
     def _parse_csv_ids(self, raw: str) -> set[str]:
         return {part.strip() for part in (raw or "").split(",") if part.strip()}
 
@@ -537,41 +402,6 @@ class CommandRouter:
             )
         except Exception as e:
             log.error("command router: reply to %s failed: %s", chat_id, e)
-
-
-def _dispatch_error_hint(error: Exception) -> str:
-    """Turn a failed workflow_dispatch into an actionable message.
-
-    GitHub's status codes map cleanly onto the three ways
-    ``GITHUB_WORKFLOW_TOKEN`` is usually wrong, so name the fix instead of
-    echoing a stack trace at the user.
-    """
-    status = getattr(getattr(error, "response", None), "status_code", None)
-    hints = {
-        401: (
-            "GitHub rejected the token (401).\n\n"
-            "GITHUB_WORKFLOW_TOKEN is invalid or expired — generate a new "
-            "fine-grained token and update it in the Vercel env vars."
-        ),
-        403: (
-            "GitHub refused the dispatch (403).\n\n"
-            "The token is missing the 'Actions: write' repository permission."
-        ),
-        404: (
-            "GitHub could not find the workflow (404).\n\n"
-            "Check GITHUB_REPOSITORY_OWNER / GITHUB_REPOSITORY_NAME / "
-            "GITHUB_SCAN_WORKFLOW_FILE, and that the token grants access to "
-            "this repository. A token without repo access also reports 404."
-        ),
-        422: (
-            "GitHub rejected the inputs (422).\n\n"
-            "Usually GITHUB_SCAN_WORKFLOW_REF points at a branch where "
-            "scan.yml has no workflow_dispatch trigger."
-        ),
-    }
-    if status in hints:
-        return hints[status]
-    return f"Could not queue the scan: {error}"
 
 
 def _add_kw(target: list, args: list, sign: str) -> BotReply:
