@@ -6,6 +6,13 @@ search:
   city: krakow
   min_area: 39           # m²
   max_price: 610000      # PLN
+
+  # Sanity floor, not a preference. Portals publish "ask for price" listings
+  # as 1 zł, and the scorer rewards being below the median — so a 275 m²
+  # apartment at "1 zł" scored ★75 and sat at the very top of the delivery
+  # queue, dressed up as the find of the year. A flat in Kraków below this
+  # is a missing price, not a cheap flat. Set 0 to switch the check off.
+  min_price: 50000       # PLN
   min_build_year: null   # off — we filter old-era buildings via keywords below instead
 
 filters:

@@ -65,6 +65,7 @@ def build_effective_snapshot(baseline_cfg: dict, override: ChatOverride) -> dict
 
     search = deepcopy(baseline_cfg.get("search") or {})
     search["max_price"] = ec.max_price()
+    search["min_price"] = ec.min_price()
     search["min_area"] = ec.min_area()
     search["max_area"] = ec.max_area()
     search["min_build_year"] = ec.min_build_year()

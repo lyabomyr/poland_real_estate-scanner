@@ -107,6 +107,14 @@ class EffectiveConfig:
     def min_area(self) -> float:
         return self.override.min_area or self.baseline["search"]["min_area"]
 
+    def min_price(self) -> int:
+        """Sanity floor on price. Baseline-only — 0 disables it.
+
+        Not a search preference: it exists to drop placeholder prices like
+        "1 zł", which would otherwise be scored as the bargain of the year.
+        """
+        return int((self.baseline.get("search") or {}).get("min_price") or 0)
+
     def max_area(self) -> Optional[float]:
         return self.override.max_area  # baseline doesn't have this — chat-only
 

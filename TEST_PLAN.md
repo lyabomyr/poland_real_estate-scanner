@@ -81,6 +81,8 @@ integration pass, **M** = manual.
 | R2.6 | a stored `rejected` row that now passes | promoted to `matched`, reason cleared | U |
 | R2.7 | promoting a row that is already matched | no-op — never demote | U |
 | R2.8 | `max_area` | enforced by the filter itself, and described by `describe()` | U |
+| R2.9 | a placeholder price ("1 zł") | rejected — it is a missing price, not a bargain | U |
+| R2.10 | no price at all | still passes; unknown is not the same as absurd | U |
 
 ### R3 — Dedup: same flat twice, or two flats collapsed into one?
 
@@ -89,6 +91,8 @@ integration pass, **M** = manual.
 | R3.1 | same-source keys | unique across the whole run | I |
 | R3.2 | fuzzy keys carry no junk | no timestamp inside an OLX key | I, U |
 | R3.3 | cross-source duplicates | the same flat on two portals collapses | I |
+| R3.5 | dedup is applied to what is **actually sent** | the backlog, not the discarded scan results | U |
+| R3.6 | dedup is not over-eager | distinct flats all survive; no fuzzy key means no collapsing | U |
 | R3.4 | a listing with no price/area/location | passes through without fuzzy dedup rather than colliding | U |
 
 ### R4 — Packaging: does a message ever swallow a listing?

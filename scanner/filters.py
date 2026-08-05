@@ -20,8 +20,14 @@ class ListingFilter:
         min_build_year: Optional[int] = None,
         reject_keywords: Iterable[str] = (),
         max_area: Optional[float] = None,
+        min_price: int = 0,
     ):
         self.min_area = min_area
+        #: Sanity floor. A "1 zł" listing is not a cheap flat, it is a missing
+        #: price — and it scores brilliantly, because the score rewards being
+        #: below the median. One such row reached ★75 and sat at the top of
+        #: the delivery queue.
+        self.min_price = min_price
         #: Upper area cap. Chat-level only — the YAML baseline has no such
         #: bound, so ``None`` means "no upper limit".
         self.max_area = max_area
@@ -49,6 +55,7 @@ class ListingFilter:
             min_area=ec.min_area(),
             max_area=ec.max_area(),
             max_price=ec.max_price(),
+            min_price=ec.min_price(),
             min_build_year=ec.min_build_year(),
             reject_keywords=ec.reject_keywords(),
         )
@@ -68,6 +75,7 @@ class ListingFilter:
         """
         payload = "|".join([
             f"{self.min_area:g}",
+            str(self.min_price),
             "-" if self.max_area is None else f"{self.max_area:g}",
             str(self.max_price),
             str(self.min_build_year or "-"),
@@ -85,6 +93,8 @@ class ListingFilter:
         """
         if l.price is not None and l.price > self.max_price:
             return False, f"price {l.price} > {self.max_price}"
+        if self.min_price and l.price is not None and l.price < self.min_price:
+            return False, f"price {l.price} < {self.min_price} (not a real price)"
         if l.area is not None and l.area < self.min_area:
             return False, f"area {l.area} < {self.min_area}"
         if self.max_area is not None and l.area is not None and l.area > self.max_area:
@@ -106,6 +116,13 @@ class ListingFilter:
         """
         rules = [
             f"reject if price is known and > {self.max_price}",
+        ]
+        if self.min_price:
+            rules.append(
+                f"reject if price is known and < {self.min_price} "
+                "(a placeholder price, not a bargain)"
+            )
+        rules += [
             f"reject if area is known and < {self.min_area}",
         ]
         if self.max_area is not None:

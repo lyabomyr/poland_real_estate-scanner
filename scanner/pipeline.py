@@ -128,7 +128,6 @@ class MultiChatPipeline:
             log.info("=== chat %s (%s) ===", ctx.chat_id, ctx.title or "")
             swept = []
             matched = self._scan_and_filter(ctx, swept)
-            matched = self._cross_source_dedup(ctx, matched)
             if ctx.scorer:
                 self._score(ctx, matched)
             # The scan's job ends here: everything it found is now stored and
@@ -139,6 +138,11 @@ class MultiChatPipeline:
                 for url in swept:
                     self.store.record_swept(url, ctx.filter.fingerprint())
                 matched = self._delivery_backlog(ctx, matched)
+            # Deduplicate whatever is actually about to be sent. This has to
+            # come after the backlog swap: deduplicating the scan results and
+            # then replacing them with the backlog silently threw the work
+            # away, and 111 duplicate messages were queued behind it.
+            matched = self._cross_source_dedup(ctx, matched)
             before_sent = self.stats.sent
             before_failed = self.stats.send_failed
             self._emit(ctx, matched)
