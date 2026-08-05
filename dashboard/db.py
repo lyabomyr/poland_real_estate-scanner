@@ -82,17 +82,32 @@ class Backend:
     kind: str                      # "turso" | "sqlite"
     detail: str                    # host, or local file path
     error: Optional[str] = None    # set when Turso creds exist but fail
+    schema_missing: bool = False   # connected, but the scanner never ran
 
     @property
     def is_turso(self) -> bool:
         return self.kind == "turso"
 
 
+# Interactive timeout: well below the scanner's 30 s so a slow database shows
+# up as an error banner rather than a spinner that never resolves.
+_HTTP_TIMEOUT_SECONDS = 12
+
+
 @st.cache_resource
 def get_store() -> SeenStore:
-    """Long-lived store handle. Cached across reruns; Streamlit keeps one per session."""
+    """Long-lived store handle. Cached across reruns; one per session.
+
+    ``ensure_schema=False`` on purpose: the DDL costs 15 sequential Turso
+    round-trips, and the scanner already owns schema creation. Skipping it
+    turns a multi-second cold start into a single connect.
+    """
     _resolve_secrets()
-    return SeenStore("./data/seen.db")
+    return SeenStore(
+        "./data/seen.db",
+        ensure_schema=False,
+        timeout=_HTTP_TIMEOUT_SECONDS,
+    )
 
 
 @st.cache_data(ttl=30)
@@ -105,10 +120,13 @@ def backend_info() -> Backend:
 
     host = url.split("://", 1)[-1]
     try:
-        get_store().conn.execute("SELECT 1").fetchone()
+        store = get_store()
+        store.conn.execute("SELECT 1").fetchone()
     except Exception as exc:  # wrong token, revoked DB, network…
         return Backend(kind="turso", detail=host, error=str(exc))
-    return Backend(kind="turso", detail=host)
+    # We skip the DDL, so an empty database is a state we have to name
+    # explicitly rather than crash on the first SELECT.
+    return Backend(kind="turso", detail=host, schema_missing=not store.schema_ready())
 
 
 def get_repo() -> ChatConfigRepo:

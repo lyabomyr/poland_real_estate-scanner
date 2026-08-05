@@ -107,6 +107,14 @@ def render_connection_status() -> bool:
         _render_secrets_help()
         return False
 
+    if backend.schema_missing:
+        st.warning(
+            "**Connected, but the database is empty.** No tables yet — the "
+            "scanner creates them on its first run. Trigger the **scan** "
+            "workflow on GitHub Actions, then refresh."
+        )
+        return False
+
     if not backend.is_turso:
         st.warning(
             "**Not connected to the shared database.** This dashboard is "

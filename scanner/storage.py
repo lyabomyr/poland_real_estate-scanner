@@ -32,7 +32,7 @@ from typing import Iterator, Optional, Set
 from .models import Listing
 
 
-def _connect(path: str):
+def _connect(path: str, timeout: int = 30):
     """Return a DB connection: Turso over HTTP if creds in env, else local sqlite3.
 
     We deliberately use Turso's HTTP API rather than the native
@@ -45,7 +45,7 @@ def _connect(path: str):
     if url and token:
         # Imported lazily so local-SQLite users don't pay for it.
         from .turso_http import TursoConnection
-        return TursoConnection(url, token)
+        return TursoConnection(url, token, timeout=timeout)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     return sqlite3.connect(path)
 
@@ -140,13 +140,36 @@ _SCHEMA_STMTS = [
 
 
 class SeenStore:
-    def __init__(self, path: str):
+    def __init__(self, path: str, *, ensure_schema: bool = True, timeout: int = 30):
+        """Open the store.
+
+        ``ensure_schema`` runs the DDL + migrations. That's 15 sequential
+        round-trips against Turso — fine once per scan, but it made the
+        dashboard pay several seconds on every cold start for tables the
+        scanner already owns. Read-mostly clients should pass
+        ``ensure_schema=False``.
+
+        ``timeout`` is the per-request HTTP timeout for the Turso backend.
+        Interactive callers want this well below the default so a slow
+        database surfaces as an error instead of an endless spinner.
+        """
         self.path = Path(path)
-        self.conn = _connect(str(self.path))
-        for stmt in _SCHEMA_STMTS:
-            self.conn.execute(stmt)
-        self._migrate()
-        self.conn.commit()
+        self.conn = _connect(str(self.path), timeout=timeout)
+        if ensure_schema:
+            for stmt in _SCHEMA_STMTS:
+                self.conn.execute(stmt)
+            self._migrate()
+            self.conn.commit()
+
+    def schema_ready(self) -> bool:
+        """True if the core tables exist. For clients that skipped the DDL."""
+        try:
+            cur = self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='seen'"
+            )
+            return cur.fetchone() is not None
+        except Exception:
+            return False
 
     def _migrate(self) -> None:
         """Add columns/indexes missing on databases created by an earlier version.
