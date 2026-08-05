@@ -130,7 +130,34 @@ class PaginationEndTests(unittest.TestCase):
 
         listings = list(src.scan())
         self.assertEqual(3, len(listings), "duplicates must not be re-yielded")
-        self.assertEqual(2, len(src.fetched), "should stop right after the repeat")
+        self.assertEqual(3, len(src.fetched), "stops after 2 barren pages in a row")
+        self.assertTrue(src.scan_completed)
+
+    def test_one_barren_page_does_not_end_a_walk_that_recovers(self) -> None:
+        """Otodom's tail is erratic: 37, 22, then 1 repeat, then 16 more.
+
+        Stopping at that single all-repeats page cost half the
+        back-catalogue, so a lone barren page must not end the walk.
+        """
+        pages = {
+            1: ["a1", "a2"],
+            2: ["b1", "b2"],
+            3: ["b1"],            # nothing new — but not the end
+            4: ["c1", "c2"],      # recovers
+            5: [],                # the real end
+        }
+        src = _FakeSource(total_pages=0)
+
+        def parse(html):
+            for i in pages.get(int(html), []):
+                yield Listing(source="fake", id=i, url=f"u/{i}", title=i,
+                              price=500_000, area=45.0)
+
+        src._parse = parse
+        src.pages = 0
+
+        got = [l.id for l in src.scan()]
+        self.assertEqual(["a1", "a2", "b1", "b2", "c1", "c2"], got)
         self.assertTrue(src.scan_completed)
 
 

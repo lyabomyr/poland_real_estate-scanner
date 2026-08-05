@@ -90,6 +90,13 @@ class BaseSource:
     #: near this many pages of flats in one price band.
     MAX_PAGES = 100
 
+    #: How many consecutive pages may add nothing new before we conclude the
+    #: source ignores our page parameter. Must be >1: Otodom's tail pages are
+    #: erratic (37, 22, then a single listing, then 16 again), so one page
+    #: that happens to be all repeats is not evidence of broken pagination —
+    #: stopping there cost us half the back-catalogue.
+    NO_NEW_PAGES_BEFORE_STOP = 2
+
     def scan(self) -> Iterable[Listing]:
         # pages=0 means "walk until a page comes back empty" — used for the
         # first sweep of a URL, where capping at 2 would leave most of the
@@ -99,6 +106,7 @@ class BaseSource:
         unlimited = self.pages <= 0
         last = self.MAX_PAGES if unlimited else self.pages
         seen_ids: set[str] = set()
+        no_new_streak = 0
         for page in range(1, last + 1):
             url = self._page_url(page)
             log.info("%s: fetching page %d", self.name, page)
@@ -139,16 +147,27 @@ class BaseSource:
                 self.scan_completed = True
                 return
             if fresh == 0:
-                # Every id repeats one we already have, so this source ignores
-                # our page parameter and is serving page 1 forever. Komornik
-                # does exactly this. Without the check an unlimited sweep
-                # would refetch the same 20 rows MAX_PAGES times.
+                no_new_streak += 1
+                if no_new_streak >= self.NO_NEW_PAGES_BEFORE_STOP:
+                    # Repeatedly nothing new means one of two things, and both
+                    # end the walk: the source ignores ?page= and keeps
+                    # serving the same rows (komornik), or we've reached the
+                    # tail where the portal recycles the last page (otodom
+                    # does this from ~page 18). Without the check an
+                    # unlimited sweep refetches the same rows MAX_PAGES times.
+                    log.info(
+                        "%s: %d pages in a row added nothing new — end of "
+                        "usable results, stopping after page %d",
+                        self.name, no_new_streak, page,
+                    )
+                    self.scan_completed = True
+                    return
                 log.info(
-                    "%s: page %d repeated the previous results — pagination "
-                    "is not supported here, stopping", self.name, page,
+                    "%s: page %d added nothing new, trying one more",
+                    self.name, page,
                 )
-                self.scan_completed = True
-                return
+            else:
+                no_new_streak = 0
             self._sleep()
         if unlimited:
             log.warning(
