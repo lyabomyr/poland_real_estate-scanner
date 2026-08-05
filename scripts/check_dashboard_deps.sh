@@ -17,8 +17,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="$(mktemp -d)/venv"
 trap 'rm -rf "$(dirname "$VENV")"' EXIT
 
-echo "==> creating isolated venv (requirements.txt only)"
-python3 -m venv "$VENV"
+PYTHON_BIN="$("$ROOT/scripts/select_python.sh")"
+echo "==> creating isolated venv (requirements.txt only) via $PYTHON_BIN"
+"$PYTHON_BIN" -m venv "$VENV"
 "$VENV/bin/pip" install --quiet --upgrade pip
 "$VENV/bin/pip" install --quiet -r "$ROOT/requirements.txt"
 

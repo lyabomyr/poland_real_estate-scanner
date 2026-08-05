@@ -14,8 +14,9 @@ PORT="${PORT:-8599}"
 TMP="$(mktemp -d)"
 trap 'pkill -f "server.port=$PORT" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 
-echo "==> venv from requirements.txt only"
-python3 -m venv "$TMP/venv"
+PYTHON_BIN="$("$ROOT/scripts/select_python.sh")"
+echo "==> venv from requirements.txt only via $PYTHON_BIN"
+"$PYTHON_BIN" -m venv "$TMP/venv"
 "$TMP/venv/bin/pip" install --quiet --upgrade pip
 "$TMP/venv/bin/pip" install --quiet -r "$ROOT/requirements.txt"
 

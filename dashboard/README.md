@@ -21,6 +21,7 @@ make dashboard
 ```
 
 Opens on `http://localhost:8501`.
+`make` auto-selects Python 3.10+ for the venv if your system `python3` is too old.
 
 Turso is required — there is no local-database fallback. Without credentials
 the app renders a "Not configured" screen with the fix, rather than quietly
@@ -49,7 +50,7 @@ module — reproducing Streamlit Cloud, where a missing package shows up as a
 `ModuleNotFoundError` on a live page rather than at build time.
 
 Dependencies come from the repo-root [`requirements.txt`](../requirements.txt),
-which Streamlit Cloud prefers over `pyproject.toml`. It is deliberately
+which Streamlit Cloud installs from. It is deliberately
 **pure-Python** — no compiled extensions — so the build cannot break on
 whatever CPython version the platform happens to run.
 
@@ -114,6 +115,5 @@ Not a cause, despite looking like one:
 * **Memory.** Measured 162 MB RSS for pandas + streamlit + plotly against a
   ~1 GB limit. Don't rip out plotly on suspicion — measure first.
 * **"WARN: More than one requirements file detected."** Streamlit sees both
-  `requirements.txt` and `pyproject.toml`. Both now declare the same
-  dependency set with no compiled packages, so either one produces a working
-  app.
+  `requirements.txt` and `requirements-dev.txt`. The deploy uses
+  `requirements.txt`; the `-dev` file is only for local tooling.

@@ -181,7 +181,11 @@ Two things have to be true:
 
 1. **`DASHBOARD_URL` is set** as a GitHub Actions *variable* (Settings →
    Secrets and variables → Actions → Variables). Without it the step is
-   skipped silently — there's nothing to link to.
+   skipped silently — there's nothing to link to. For this project:
+
+   ```
+   DASHBOARD_URL = https://poland-realestate-scanner.streamlit.app
+   ```
 2. **The bot is a chat admin**, otherwise Telegram refuses `pinChatMessage`.
    The message is still delivered; only the pin is skipped, and the log says
    which happened.
@@ -224,9 +228,10 @@ See [`dashboard/README.md`](dashboard/README.md).
 
 ## Local development
 
-Only Python 3.11+ is needed — dependencies come from
+Only Python 3.10+ is needed — dependencies come from
 [`requirements.txt`](requirements.txt), the same file Streamlit Cloud
-installs. `make install` builds a local `.venv` from it.
+installs. `make install` auto-selects Python 3.12/3.11/3.10 when your
+system `python3` is older.
 
 ```bash
 make install

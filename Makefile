@@ -4,6 +4,7 @@
 VENV := .venv
 PY   := $(VENV)/bin/python
 PIP  := $(VENV)/bin/pip
+SELECT_PY := ./scripts/select_python.sh
 
 .PHONY: help install run dry config clean reset-db test lint chats prune greet \
         check-dashboard-deps boot-check
@@ -12,7 +13,8 @@ help:
 	@awk 'BEGIN{FS=":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z_-]+:.*##/{printf "  \033[36m%-22s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
 
 $(PY):
-	python3 -m venv $(VENV)
+	PYTHON_BIN="$$($(SELECT_PY))"; \
+	"$$PYTHON_BIN" -m venv $(VENV)
 	$(PIP) install --quiet --upgrade pip
 
 install: $(PY)  ## create .venv and install runtime + dev dependencies
