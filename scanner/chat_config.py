@@ -115,6 +115,15 @@ class EffectiveConfig:
         """
         return int((self.baseline.get("search") or {}).get("min_price") or 0)
 
+    def require_price(self) -> bool:
+        """Whether a listing without a published price is rejected.
+
+        Baseline-only, and on by default: an unpriced listing silently
+        bypasses ``max_price``, which is the whole point of the tool.
+        """
+        value = (self.baseline.get("search") or {}).get("require_price")
+        return True if value is None else bool(value)
+
     def max_area(self) -> Optional[float]:
         return self.override.max_area  # baseline doesn't have this — chat-only
 

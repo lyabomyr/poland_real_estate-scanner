@@ -21,6 +21,7 @@ class ListingFilter:
         reject_keywords: Iterable[str] = (),
         max_area: Optional[float] = None,
         min_price: int = 0,
+        require_price: bool = False,
     ):
         self.min_area = min_area
         #: Sanity floor. A "1 zł" listing is not a cheap flat, it is a missing
@@ -28,6 +29,13 @@ class ListingFilter:
         #: below the median. One such row reached ★75 and sat at the top of
         #: the delivery queue.
         self.min_price = min_price
+        #: Reject a listing whose price is unknown. A budget filter cannot
+        #: judge one, so it bypasses max_price entirely — and both portals
+        #: produce plenty: Otodom lists whole developments with no price at
+        #: all, Morizon's deep pages are full of "Zapytaj o cenę". Area is
+        #: deliberately not treated this way; komornik publishes a price but
+        #: rarely a size, and those auctions are worth seeing.
+        self.require_price = require_price
         #: Upper area cap. Chat-level only — the YAML baseline has no such
         #: bound, so ``None`` means "no upper limit".
         self.max_area = max_area
@@ -56,6 +64,7 @@ class ListingFilter:
             max_area=ec.max_area(),
             max_price=ec.max_price(),
             min_price=ec.min_price(),
+            require_price=ec.require_price(),
             min_build_year=ec.min_build_year(),
             reject_keywords=ec.reject_keywords(),
         )
@@ -76,6 +85,7 @@ class ListingFilter:
         payload = "|".join([
             f"{self.min_area:g}",
             str(self.min_price),
+            str(self.require_price),
             "-" if self.max_area is None else f"{self.max_area:g}",
             str(self.max_price),
             str(self.min_build_year or "-"),
@@ -91,6 +101,8 @@ class ListingFilter:
         source actually gave us a number that failed the threshold — otherwise
         we'd throw away every komornik listing (they rarely publish m²).
         """
+        if self.require_price and l.price is None:
+            return False, "no price published"
         if l.price is not None and l.price > self.max_price:
             return False, f"price {l.price} > {self.max_price}"
         if self.min_price and l.price is not None and l.price < self.min_price:
@@ -136,5 +148,13 @@ class ListingFilter:
                 "reject if title/description/location matches any reject keyword: "
                 + ", ".join(self.reject_keywords)
             )
-        rules.append("missing price / area / build_year never reject by themselves")
+        if self.require_price:
+            rules.append(
+                "reject if no price is published — it cannot be checked "
+                "against the budget"
+            )
+        rules.append(
+            "missing area / build_year never reject by themselves"
+            + ("" if self.require_price else "; nor does a missing price")
+        )
         return rules

@@ -16,6 +16,7 @@ Four real examples, all found and fixed:
 
 | what happened | what it looked like |
 |---|---|
+| listings with no price bypassed `max_price` entirely | 117 of 645 queued messages, budget filter silently defeated |
 | a 77-listing group rendered to 10 853 chars; Telegram rejects >4096 | 220 of 1004 listings unreachable, logs said nothing |
 | delivery driven by "what this scan saw"; the run was killed mid-send | 647 listings matched but never sent, re-stranded every run |
 | a keyword deleted from the config, but the stored row still said `rejected` | listing passed the filter, then vanished |
@@ -82,7 +83,9 @@ integration pass, **M** = manual.
 | R2.7 | promoting a row that is already matched | no-op — never demote | U |
 | R2.8 | `max_area` | enforced by the filter itself, and described by `describe()` | U |
 | R2.9 | a placeholder price ("1 zł") | rejected — it is a missing price, not a bargain | U |
-| R2.10 | no price at all | still passes; unknown is not the same as absurd | U |
+| R2.10 | no price published | rejected — it cannot be checked against the budget | U |
+| R2.11 | no area published | still passes; komornik prices its auctions but rarely sizes them | U |
+| R2.12 | `require_price: false` | the unpriced listings come back | U |
 
 ### R3 — Dedup: same flat twice, or two flats collapsed into one?
 
@@ -182,7 +185,7 @@ and it is slow. Run it after touching a parser, a filter, or delivery.
 
 ## Last run
 
-77 unit tests green, pyflakes clean, dashboard serves all three pages 200,
+88 unit tests green, pyflakes clean, dashboard serves all three pages 200,
 and 27/27 integration cases passed against the live market:
 
 ```
@@ -190,22 +193,28 @@ R1.1  otodom=361 · olx=28 · morizon=648 · komornik=20
 R1.2  every source walked to the end of its result set
 R1.4  requests path OK, 37 listings on page 1
 R1.5  curl fallback OK, 37 listings, marker stripped
-R2.1  56/1057 rejected (5.3%) — price×24, TBS×16, udział×9,
-      wielkiej płyty×3, area×2, z lat 60×1, suterena×1
+R2.1  rejected with a per-reason breakdown, single-digit percentage
+R2.3  missing area passes, missing price rejects
 R2.5  fingerprint e8d2a7370511 -> 0dd9fc6777d9, verdict flips
 R3.1  1057 unique dedup keys across 1057 listings
 R3.3  125 cross-source duplicates collapse out of 800 keyed listings
-R4.1  1001 listings -> 620 messages, none lost, none duplicated
+R4.1  every listing emitted exactly once, none duplicated
 R4.2  longest message 3209 chars, limit 4096
 R4.3  /grouping 0 -> 1001 individual messages
-R5.1  1004 matched, 357 delivered, 647 still owed
+R5.1  876 matched, 357 delivered, 528 still owed
 R5.2  top of backlog: [83, 82, 81, 80, 80]
-R5.3  no overlap between 647 queued and 357 sent
+R5.3  no overlap between queued and sent
 R7.1  34 command forms all answer, all under 4096 chars
 R9.1  median 13504 zł/m², scores 31..83
 ```
 
-Two defects were found by this pass rather than by review:
+Three defects were found by this pass rather than by review:
+
+- **R2.3** — listings with no published price bypassed `max_price`
+  altogether: 117 of 645 queued messages. Otodom mixes whole developments
+  into the results, Morizon's deep pages are full of "Zapytaj o cenę".
+  `require_price` now rejects them; missing *area* still passes, because
+  komornik prices its auctions but rarely sizes them.
 
 - **R4.3** — `/grouping 99` was documented as "off" and is not. Kraków
   produces a 104-listing location bucket, so 99 still grouped. Fixed by

@@ -13,6 +13,25 @@ search:
   # queue, dressed up as the find of the year. A flat in Kraków below this
   # is a missing price, not a cheap flat. Set 0 to switch the check off.
   min_price: 50000       # PLN
+
+  # Reject listings that publish no price at all. On by default, because an
+  # unpriced listing cannot be checked against max_price — the one thing this
+  # tool is for — so it slips into the channel however expensive it is.
+  #
+  # Both portals produce plenty of them, and neither is a flat you can buy:
+  #   - Otodom mixes whole developments into the results ("Przystanek
+  #     Prądnik", "Nowe Branice II"): 76 units, an area *range*, and a price
+  #     "from" per m². Not an apartment, an advertisement for a project.
+  #   - Morizon's deep pages are full of "Zapytaj o cenę" — 58 of them on
+  #     page 15 alone.
+  # Measured on the live queue: 117 of 645 messages would have had no price.
+  #
+  # Note this applies to price only. A missing *area* never rejects:
+  # komornik always publishes a price and rarely a size, and those auctions
+  # are worth seeing.
+  #
+  # Set false if you would rather see them and judge for yourself.
+  require_price: true
   min_build_year: null   # off — we filter old-era buildings via keywords below instead
 
 filters:

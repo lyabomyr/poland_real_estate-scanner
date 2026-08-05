@@ -62,6 +62,27 @@ def default_reply_keyboard() -> dict:
     }
 
 
+def fetch_updates(bot_token: str, timeout: int = 10) -> list:
+    """Raw ``getUpdates`` result, or an empty list when there is nothing to read.
+
+    One place, because three callers need it — chat discovery, membership
+    detection and the command router — and each had its own copy of the same
+    token guard, request and ``ok`` check.
+
+    Only surfaces the last ~24 h; that is Telegram's retention, not ours.
+    """
+    if not bot_token or bot_token.startswith("REPLACE"):
+        return []
+    r = requests.get(
+        f"https://api.telegram.org/bot{bot_token}/getUpdates",
+        params={"limit": 100},
+        timeout=timeout,
+    )
+    r.raise_for_status()
+    data = r.json()
+    return data.get("result", []) or [] if data.get("ok") else []
+
+
 def find_new_chat_memberships(bot_token: str, timeout: int = 10) -> List[dict]:
     """Return chats where the bot has *become* a member/admin recently.
 
@@ -73,20 +94,10 @@ def find_new_chat_memberships(bot_token: str, timeout: int = 10) -> List[dict]:
 
     Only sees events from the last ~24 h — Telegram's default retention.
     """
-    if not bot_token or bot_token.startswith("REPLACE"):
-        return []
-    r = requests.get(
-        f"https://api.telegram.org/bot{bot_token}/getUpdates",
-        params={"limit": 100},
-        timeout=timeout,
-    )
-    r.raise_for_status()
-    data = r.json()
-    if not data.get("ok"):
-        return []
+    updates = fetch_updates(bot_token, timeout)
 
     out = {}
-    for upd in data.get("result", []) or []:
+    for upd in updates:
         mcm = upd.get("my_chat_member")
         if not mcm:
             continue
@@ -161,22 +172,12 @@ def discover_chats(bot_token: str, timeout: int = 10) -> List[dict]:
     Caveat: in a group with Privacy Mode ON (BotFather default) the bot only
     sees commands addressed to it, so a plain "hi" won't surface the chat.
     """
-    if not bot_token or bot_token.startswith("REPLACE"):
-        return []
-    r = requests.get(
-        f"https://api.telegram.org/bot{bot_token}/getUpdates",
-        params={"limit": 100},
-        timeout=timeout,
-    )
-    r.raise_for_status()
-    data = r.json()
-    if not data.get("ok"):
-        return []
+    updates = fetch_updates(bot_token, timeout)
 
     # Same chat may appear across multiple update types (message, my_chat_member,
     # …). Dedup by chat.id, keep the first one we saw.
     seen: dict = {}
-    for upd in data.get("result", []) or []:
+    for upd in updates:
         for key in ("message", "channel_post", "edited_message",
                     "edited_channel_post", "my_chat_member", "chat_member"):
             m = upd.get(key)

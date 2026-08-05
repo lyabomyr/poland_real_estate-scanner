@@ -129,10 +129,28 @@ class PlaceholderPriceTests(unittest.TestCase):
     def test_a_real_price_still_passes(self) -> None:
         self.assertTrue(self.filter.accepts(_listing("otodom", 2, price=550_000))[0])
 
-    def test_no_price_at_all_still_passes(self) -> None:
-        """Unknown is not the same as absurd — komornik rarely publishes one."""
-        blank = Listing(source="komornik", id="1", url="u", title="lokal mieszkalny")
-        self.assertTrue(self.filter.accepts(blank)[0])
+    def test_no_price_at_all_is_rejected_by_default(self) -> None:
+        """It cannot be checked against the budget, so it bypasses max_price.
+
+        Otodom mixes whole developments into the results and Morizon's deep
+        pages are full of "Zapytaj o cenę" — 117 of 645 queued messages.
+        """
+        blank = Listing(source="otodom", id="1", url="u", title="Przystanek Prądnik")
+        ok, reason = self.filter.accepts(blank)
+        self.assertFalse(ok)
+        self.assertIn("no price", reason)
+
+    def test_a_missing_area_still_passes(self) -> None:
+        """Price and area are not symmetrical. Komornik always publishes a
+        price and rarely a size, and those auctions are worth seeing."""
+        no_area = Listing(source="komornik", id="1", url="u",
+                          title="lokal mieszkalny", price=289_260)
+        self.assertTrue(self.filter.accepts(no_area)[0])
+
+    def test_require_price_can_be_switched_off(self) -> None:
+        lenient = ListingFilter(min_area=0, max_price=10**9, require_price=False)
+        blank = Listing(source="otodom", id="1", url="u", title="Przystanek Prądnik")
+        self.assertTrue(lenient.accepts(blank)[0])
 
     def test_the_floor_is_part_of_the_fingerprint(self) -> None:
         """Otherwise changing it would not retire completed sweeps."""

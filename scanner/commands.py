@@ -21,8 +21,6 @@ import os
 from dataclasses import asdict, dataclass
 from typing import Callable, Dict, List, Optional
 
-import requests
-
 from .chat_config import ChatOverride, EffectiveConfig
 from .chat_repo import ChatConfigRepo
 from .registry import KNOWN_SOURCES
@@ -34,11 +32,10 @@ from .introspection import (
     number_chunks,
     split_telegram_text,
 )
-from .telegram import default_reply_keyboard, send_message
+from .telegram import default_reply_keyboard, fetch_updates, send_message
 
 log = logging.getLogger(__name__)
 
-_TG_API = "https://api.telegram.org/bot{token}/{method}"
 # Single source of truth — see scanner/registry.py
 _KNOWN_SOURCES = KNOWN_SOURCES
 
@@ -98,26 +95,12 @@ class CommandRouter:
 
     def process_pending(self) -> int:
         """Fetch new getUpdates, dispatch every ``/…`` message. Returns count."""
-        if not self.bot_token or self.bot_token.startswith("REPLACE"):
-            return 0
         try:
-            r = requests.get(
-                _TG_API.format(token=self.bot_token, method="getUpdates"),
-                params={"limit": 100},
-                timeout=10,
-            )
-            r.raise_for_status()
-            data = r.json()
+            updates = fetch_updates(self.bot_token)
         except Exception as e:
             log.warning("command router: getUpdates failed: %s", e)
             return 0
-        if not data.get("ok"):
-            return 0
-
-        handled = 0
-        for upd in data.get("result", []) or []:
-            handled += 1 if self.process_update(upd) else 0
-        return handled
+        return sum(1 for upd in updates if self.process_update(upd))
 
     def process_update(self, upd: dict) -> bool:
         """Process one Telegram update dict. Returns True if it was a command."""

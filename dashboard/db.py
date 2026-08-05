@@ -164,43 +164,27 @@ def _query_df(query: str, params: tuple = ()) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=cols)
 
 
-@st.cache_data(ttl=60)
-def load_listings(chat_id: Optional[str] = None) -> pd.DataFrame:
-    """Matched listings, optionally scoped to what one chat was notified about.
+#: Columns for the table view. Deliberately excludes description/image blobs
+#: so a rerun doesn't drag them over the wire.
+_TABLE_COLS = ("key, source, title, url, price, area, score, score_reasons, "
+               "fuzzy_key, first_seen_at")
 
-    ``chat_id=None`` returns everything the scanner ever matched. Passing a
-    chat id joins ``chat_emissions``, which is the per-chat delivery log —
-    two chats with different filters legitimately see different listings, so
-    "what did *this* chat get" is a different question from "what matched".
+#: Everything the card view renders, blobs included.
+_CARD_COLS = ("key, source, title, url, price, area, score, score_reasons, "
+              "location, description, image_url, fuzzy_key, first_seen_at")
+
+
+def _matched_listings(cols: str, chat_id: Optional[str]) -> pd.DataFrame:
+    """Matched listings, optionally scoped to one chat's delivery log.
+
+    ``chat_id=None`` is "everything the scanner matched"; a chat id joins
+    ``chat_emissions``, which is a different question — two chats with
+    different filters legitimately see different listings.
+
+    One body for both column sets: the table and card views differ only in
+    what they select, and keeping two near-identical copies of the join and
+    the ORDER BY is how they drift apart.
     """
-    if chat_id is None:
-        return _query_df(
-            "SELECT key, source, title, url, price, area, score, score_reasons, "
-            "       fuzzy_key, first_seen_at, NULL AS sent_at "
-            "FROM seen WHERE status = 'matched' "
-            "ORDER BY score DESC NULLS LAST, price ASC"
-        )
-    return _query_df(
-        "SELECT s.key, s.source, s.title, s.url, s.price, s.area, s.score, "
-        "       s.score_reasons, s.fuzzy_key, s.first_seen_at, e.sent_at "
-        "FROM chat_emissions e JOIN seen s ON s.key = e.listing_key "
-        "WHERE e.chat_id = ? AND s.status = 'matched' "
-        "ORDER BY s.score DESC NULLS LAST, s.price ASC",
-        (str(chat_id),),
-    )
-
-
-@st.cache_data(ttl=60)
-def load_listings_full(chat_id: Optional[str] = None) -> pd.DataFrame:
-    """Like :func:`load_listings` but with the card fields (image, blurb, location).
-
-    Kept separate so the big table view doesn't drag description blobs over
-    the wire on every rerun.
-    """
-    cols = (
-        "key, source, title, url, price, area, score, score_reasons, "
-        "location, description, image_url, fuzzy_key, first_seen_at"
-    )
     if chat_id is None:
         return _query_df(
             f"SELECT {cols}, NULL AS sent_at FROM seen WHERE status = 'matched' "
@@ -214,6 +198,28 @@ def load_listings_full(chat_id: Optional[str] = None) -> pd.DataFrame:
         "ORDER BY s.score DESC NULLS LAST, s.price ASC",
         (str(chat_id),),
     )
+
+
+@st.cache_data(ttl=60)
+def load_listings(chat_id: Optional[str] = None) -> pd.DataFrame:
+    """Matched listings, optionally scoped to what one chat was notified about.
+
+    ``chat_id=None`` returns everything the scanner ever matched. Passing a
+    chat id joins ``chat_emissions``, which is the per-chat delivery log —
+    two chats with different filters legitimately see different listings, so
+    "what did *this* chat get" is a different question from "what matched".
+    """
+    return _matched_listings(_TABLE_COLS, chat_id)
+
+
+@st.cache_data(ttl=60)
+def load_listings_full(chat_id: Optional[str] = None) -> pd.DataFrame:
+    """Like :func:`load_listings` but with the card fields (image, blurb, location).
+
+    Kept separate so the big table view doesn't drag description blobs over
+    the wire on every rerun.
+    """
+    return _matched_listings(_CARD_COLS, chat_id)
 
 
 @st.cache_data(ttl=60)

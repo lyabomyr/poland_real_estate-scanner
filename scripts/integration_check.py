@@ -152,10 +152,20 @@ def t_r2_2():
 
 
 def t_r2_3():
-    """Unknown price/area must never reject — komornik rarely publishes m²."""
-    blank = Listing(source="komornik", id="1", url="u", title="lokal mieszkalny")
-    assert FLT.accepts(blank)[0], "a listing with no price/area was rejected"
-    return "missing price/area does not reject"
+    """Price and area are not symmetrical, and the asymmetry is deliberate.
+
+    No price means the budget cannot be checked, so it is rejected. No area
+    is fine — komornik prices its auctions but rarely sizes them.
+    """
+    no_area = Listing(source="komornik", id="1", url="u",
+                      title="lokal mieszkalny", price=289_260)
+    assert FLT.accepts(no_area)[0], "a priced listing with no area was rejected"
+
+    no_price = Listing(source="otodom", id="2", url="u", title="Przystanek Prądnik")
+    ok, reason = FLT.accepts(no_price)
+    assert not ok, "an unpriced listing slipped past the budget filter"
+    assert "no price" in reason, reason
+    return "missing area passes, missing price rejects"
 
 
 def t_r2_4():
@@ -410,7 +420,7 @@ if __name__ == "__main__":
         ("R1.5", "otodom curl fallback works", t_r1_5),
         ("R2.1", "filters are not over-rejecting", t_r2_1),
         ("R2.2", "price/area boundaries are exact", t_r2_2),
-        ("R2.3", "missing price/area never rejects", t_r2_3),
+        ("R2.3", "missing area passes, missing price rejects", t_r2_3),
         ("R2.4", "Polish inflected forms are caught", t_r2_4),
         ("R2.5", "deleting a keyword takes effect", t_r2_5),
         ("R3.1", "dedup keys are unique", t_r3_1),
