@@ -106,9 +106,10 @@ _SCHEMA_STMTS = [
     # was notified about it.
     """
     CREATE TABLE IF NOT EXISTS chat_emissions (
-        chat_id     TEXT NOT NULL,
-        listing_key TEXT NOT NULL,
-        sent_at     TEXT NOT NULL DEFAULT (datetime('now')),
+        chat_id       TEXT NOT NULL,
+        listing_key   TEXT NOT NULL,
+        emitted_price INTEGER,   -- price at the moment we notified this chat
+        sent_at       TEXT NOT NULL DEFAULT (datetime('now')),
         PRIMARY KEY (chat_id, listing_key)
     )
     """,
@@ -116,6 +117,16 @@ _SCHEMA_STMTS = [
     # Processed Telegram update ids (webhook or polling fallback). Storing
     # them here makes command + greeting handling idempotent across retries
     # and scanner restarts.
+    """
+    CREATE TABLE IF NOT EXISTS price_history (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        listing_key TEXT NOT NULL,
+        old_price   INTEGER,
+        new_price   INTEGER,
+        changed_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS price_history_key_idx ON price_history(listing_key)",
     """
     CREATE TABLE IF NOT EXISTS command_updates (
         update_id    INTEGER PRIMARY KEY,
@@ -158,6 +169,12 @@ class SeenStore:
         # guaranteed to exist by this point.
         self.conn.execute("CREATE INDEX IF NOT EXISTS seen_fuzzy_idx ON seen(fuzzy_key)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS seen_score_idx ON seen(score)")
+
+        emission_cols = {
+            r[1] for r in self.conn.execute("PRAGMA table_info(chat_emissions)").fetchall()
+        }
+        if "emitted_price" not in emission_cols:
+            self.conn.execute("ALTER TABLE chat_emissions ADD COLUMN emitted_price INTEGER")
 
     def has(self, key: str) -> bool:
         cur = self.conn.execute("SELECT 1 FROM seen WHERE key = ? LIMIT 1", (key,))
@@ -231,6 +248,43 @@ class SeenStore:
                 reject_reason,
                 fuzzy_key,
             ),
+        )
+        self.conn.commit()
+
+    def stored_price(self, key: str) -> Optional[int]:
+        """Last price we recorded for a listing, or None if unknown."""
+        cur = self.conn.execute("SELECT price FROM seen WHERE key = ?", (key,))
+        row = cur.fetchone()
+        return None if not row or row[0] is None else int(row[0])
+
+    def record_price_change(
+        self,
+        key: str,
+        old_price: Optional[int],
+        new_price: int,
+        fuzzy_key: Optional[str] = None,
+    ) -> None:
+        """Update the listing's current price and append to ``price_history``.
+
+        ``add()`` uses INSERT OR IGNORE, so a re-seen listing never updates its
+        row — which meant price movements were silently invisible. This is the
+        explicit path for "same listing, new price".
+
+        ``fuzzy_key`` is refreshed too when supplied: the key embeds the price,
+        so leaving the old one behind would break cross-source dedup against
+        the *new* price (the same flat relisted elsewhere at the new number
+        would no longer collide).
+        """
+        if fuzzy_key is not None:
+            self.conn.execute(
+                "UPDATE seen SET price = ?, fuzzy_key = ? WHERE key = ?",
+                (int(new_price), fuzzy_key, key),
+            )
+        else:
+            self.conn.execute("UPDATE seen SET price = ? WHERE key = ?", (int(new_price), key))
+        self.conn.execute(
+            "INSERT INTO price_history (listing_key, old_price, new_price) VALUES (?, ?, ?)",
+            (key, None if old_price is None else int(old_price), int(new_price)),
         )
         self.conn.commit()
 

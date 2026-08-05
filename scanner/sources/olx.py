@@ -18,6 +18,10 @@ _ID_FROM_URL = re.compile(r"ID([A-Za-z0-9]+)\.html")
 class OlxSource(BaseSource):
     name = "olx"
 
+    URL_TEMPLATE = (
+        "https://www.olx.pl/nieruchomosci/mieszkania/sprzedaz/{city}/?search%5Bfilter_float_price%3Ato%5D={max_price}&search%5Bfilter_float_m%3Afrom%5D={min_area}"
+    )
+
     def _parse(self, html: str) -> Iterable[Listing]:
         soup = BeautifulSoup(html, "html.parser")
         for card in soup.select('[data-cy="l-card"]'):

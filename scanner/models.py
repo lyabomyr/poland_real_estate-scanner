@@ -57,6 +57,17 @@ class Listing:
     # source data — treat as derived.
     score: Optional[DealScore] = None
 
+    # Set when this listing is being re-notified because its price moved.
+    # None on a first sighting. Derived, like ``score``.
+    previous_price: Optional[int] = None
+
+    @property
+    def price_delta(self) -> Optional[int]:
+        """Signed change since we last notified. None unless re-notifying."""
+        if self.previous_price is None or self.price is None:
+            return None
+        return self.price - self.previous_price
+
     @property
     def dedup_key(self) -> str:
         return f"{self.source}:{self.id}"

@@ -18,6 +18,10 @@ _ID_RE = re.compile(r"(mzn\d+)")
 class MorizonSource(BaseSource):
     name = "morizon"
 
+    URL_TEMPLATE = (
+        "https://www.morizon.pl/mieszkania/najnowsze/{city}/?ps%5Bprice_to%5D={max_price}&ps%5Bliving_area_from%5D={min_area}"
+    )
+
     def _parse(self, html: str) -> Iterable[Listing]:
         soup = BeautifulSoup(html, "html.parser")
         for card in soup.select(".card"):

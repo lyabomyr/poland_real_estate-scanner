@@ -40,6 +40,18 @@ def _area_str(l: Listing) -> str:
     return f"{l.area:g} m²" if l.area else "—"
 
 
+def _price_change_str(l: Listing) -> str:
+    """"⬇️ price cut 40 000 zł (was 590 000 zł)" — empty unless re-notifying."""
+    delta = l.price_delta
+    if not delta:
+        return ""
+    arrow = "⬇️ price cut" if delta < 0 else "⬆️ price up"
+    amount = f"{abs(delta):,} zł".replace(",", " ")
+    was = f"{l.previous_price:,} zł".replace(",", " ")
+    pct = f" ({abs(delta) / l.previous_price * 100:.0f}%)" if l.previous_price else ""
+    return f"{arrow} {amount}{pct} — was {was}"
+
+
 def _score_str(l: Listing) -> str:
     """Compact "★ 78/100 (…reasons…)" — empty if no score attached."""
     if not l.score:
@@ -56,6 +68,9 @@ def _sort_key(l: Listing):
 
 def format_plain(l: Listing) -> str:
     parts = [f"[{l.source}] {l.title or '(no title)'}"]
+    change = _price_change_str(l)
+    if change:
+        parts.append(change)
     row = _price_area_row(l)
     if row:
         parts.append(row)
@@ -71,7 +86,11 @@ def format_plain(l: Listing) -> str:
 
 
 def format_html(l: Listing) -> str:
-    parts = [f"<b>[{l.source}]</b> {_esc(l.title or '(no title)')}"]
+    prefix = "🔔 <b>PRICE CHANGE</b>\n" if l.price_delta else ""
+    parts = [f"{prefix}<b>[{l.source}]</b> {_esc(l.title or '(no title)')}"]
+    change = _price_change_str(l)
+    if change:
+        parts.append(f"<b>{_esc(change)}</b>")
     row = _price_area_row(l)
     if row:
         parts.append(row)

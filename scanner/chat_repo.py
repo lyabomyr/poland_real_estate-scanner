@@ -105,10 +105,35 @@ class ChatConfigRepo:
         )
         return cur.fetchone() is not None
 
-    def record_emission(self, chat_id, listing_key: str) -> None:
-        self.store.conn.execute(
-            "INSERT OR IGNORE INTO chat_emissions (chat_id, listing_key) VALUES (?, ?)",
+    def emitted_price(self, chat_id, listing_key: str) -> Optional[int]:
+        """Price this chat was last notified at, or None if never / unknown.
+
+        Drives price-change re-notification: if the listing now costs
+        something different from what we told this chat, it's news again.
+        """
+        cur = self.store.conn.execute(
+            "SELECT emitted_price FROM chat_emissions "
+            "WHERE chat_id = ? AND listing_key = ? LIMIT 1",
             (str(chat_id), listing_key),
+        )
+        row = cur.fetchone()
+        return None if not row or row[0] is None else int(row[0])
+
+    def record_emission(self, chat_id, listing_key: str, price: Optional[int] = None) -> None:
+        """Mark a listing as delivered to a chat, remembering the price.
+
+        Upserts rather than INSERT OR IGNORE so a re-emission after a price
+        change refreshes both the price and the timestamp.
+        """
+        self.store.conn.execute(
+            """
+            INSERT INTO chat_emissions (chat_id, listing_key, emitted_price, sent_at)
+            VALUES (?, ?, ?, datetime('now'))
+            ON CONFLICT(chat_id, listing_key) DO UPDATE SET
+                emitted_price = excluded.emitted_price,
+                sent_at       = excluded.sent_at
+            """,
+            (str(chat_id), listing_key, None if price is None else int(price)),
         )
         self.store.conn.commit()
 

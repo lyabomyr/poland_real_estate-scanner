@@ -53,6 +53,7 @@ class RunStats:
     rejected: int = 0
     matched: int = 0        # aggregate across all chats
     cross_dup: int = 0
+    price_changed: int = 0  # re-notified because the price moved
     sent: int = 0
 
     def as_dict(self) -> dict:
@@ -140,13 +141,44 @@ class MultiChatPipeline:
                         ok, _ = ctx.filter.accepts(listing)
                         if not ok:
                             continue
+                        # A re-seen listing whose price moved is news again —
+                        # portals edit prices in place, keeping the same id, so
+                        # without this a drop would be silently swallowed by the
+                        # has_emitted() check below.
+                        self._note_price_change(listing)
 
-                    if self.repo.has_emitted(ctx.chat_id, listing.dedup_key):
-                        continue
+                    emitted_price = self.repo.emitted_price(ctx.chat_id, listing.dedup_key)
+                    already = self.repo.has_emitted(ctx.chat_id, listing.dedup_key)
+                    if already:
+                        # Re-notify only on a real price move we can prove: we
+                        # need both the old and new numbers.
+                        if not (listing.price and emitted_price and listing.price != emitted_price):
+                            continue
+                        listing.previous_price = emitted_price
+                        self.stats.price_changed += 1
+                        log.info(
+                            "[%s] price change %s: %s -> %s",
+                            ctx.chat_id, listing.url, emitted_price, listing.price,
+                        )
                     matched[src.name].append(listing)
             except Exception:
                 log.exception("[%s] source %s crashed", ctx.chat_id, src.name)
         return matched
+
+    def _note_price_change(self, listing: Listing) -> None:
+        """Persist a price move on an already-stored listing.
+
+        ``SeenStore.add()`` is INSERT OR IGNORE, so a re-seen row never
+        updates itself. This is the one place that writes a new price and
+        appends to ``price_history``, giving the dashboard a price timeline.
+        """
+        if listing.price is None or self.dry_run:
+            return
+        stored = self.store.stored_price(listing.dedup_key)
+        if stored is not None and stored != listing.price:
+            self.store.record_price_change(
+                listing.dedup_key, stored, listing.price, fuzzy_key=listing.fuzzy_key
+            )
 
     # ── phase 2 ────────────────────────────────────────────────────────
 
@@ -209,14 +241,14 @@ class MultiChatPipeline:
                     if not self.dry_run and ctx.notifier.send_group(item):
                         self.stats.sent += 1
                         for l in item.items:
-                            self.repo.record_emission(ctx.chat_id, l.dedup_key)
+                            self.repo.record_emission(ctx.chat_id, l.dedup_key, l.price)
                 else:
                     self.stats.matched += 1
                     print(format_plain(item))
                     print("-" * 60)
                     if not self.dry_run and ctx.notifier.send(item):
                         self.stats.sent += 1
-                        self.repo.record_emission(ctx.chat_id, item.dedup_key)
+                        self.repo.record_emission(ctx.chat_id, item.dedup_key, item.price)
 
 
 # ── context builder ────────────────────────────────────────────────────
@@ -261,7 +293,7 @@ def build_chat_context(
         "delay": http.get("delay_seconds", 2),
     }
     sources: List[BaseSource] = []
-    for name, sconf in ec.enabled_source_configs().items():
+    for name, sconf in ec.enabled_source_configs(source_registry).items():
         cls = source_registry.get(name)
         if not cls:
             log.warning("chat %s: unknown source '%s' — ignored", row.chat_id, name)

@@ -21,6 +21,10 @@ _ITEMS_PATHS = (
 class OtodomSource(BaseSource):
     name = "otodom"
 
+    URL_TEMPLATE = (
+        "https://www.otodom.pl/pl/wyniki/sprzedaz/mieszkanie/{region_slug}/{city}/{city}/{city}?priceMax={max_price}&areaMin={min_area}&limit=36&by=LATEST&direction=DESC"
+    )
+
     def _parse(self, html: str) -> Iterable[Listing]:
         soup = BeautifulSoup(html, "html.parser")
         tag = soup.find("script", id="__NEXT_DATA__")

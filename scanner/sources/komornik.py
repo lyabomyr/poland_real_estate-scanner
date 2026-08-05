@@ -23,6 +23,10 @@ _DETAIL_URL = "https://licytacje.komornik.pl/licytacje/{}"
 class KomornikSource(BaseSource):
     name = "komornik"
 
+    URL_TEMPLATE = (
+        "https://licytacje.komornik.pl/wyszukiwarka-licytacji?mainCategory=REAL_ESTATE&subCategory=APARTMENTS&province={region_name}&city={city_label}"
+    )
+
     def _parse(self, html: str) -> Iterable[Listing]:
         m = _NUXT_DATA_RE.search(html)
         if not m:

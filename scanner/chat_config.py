@@ -33,6 +33,7 @@ class ChatOverride:
     """
 
     # search.*
+    city: Optional[str] = None      # e.g. "katowice" — see scanner.cities
     max_price: Optional[int] = None
     min_area: Optional[float] = None
     max_area: Optional[float] = None
@@ -94,6 +95,12 @@ class EffectiveConfig:
 
     # ── merged getters — everything else can just read plain dicts ─────
 
+    def city_key(self) -> str:
+        """Effective city slug. Drives dynamically built source URLs."""
+        from .cities import get_city
+        raw = self.override.city or (self.baseline.get("search") or {}).get("city")
+        return get_city(raw).key
+
     def max_price(self) -> int:
         return self.override.max_price or self.baseline["search"]["max_price"]
 
@@ -137,10 +144,24 @@ class EffectiveConfig:
     def parse_mode(self) -> str:
         return ((self.baseline.get("telegram") or {}).get("parse_mode") or "HTML").strip() or "HTML"
 
-    def enabled_source_configs(self) -> Dict[str, dict]:
-        """Return ``{source_name: source_config_dict}`` with the chat's
-        disabled sources filtered out and its URL overrides applied."""
+    def enabled_source_configs(self, source_registry: Optional[dict] = None) -> Dict[str, dict]:
+        """Return ``{source_name: source_config_dict}`` ready to instantiate.
+
+        URL precedence, most specific first:
+
+        1. the chat's ``source_urls[name]`` override — full manual control
+        2. an explicit ``url`` in the YAML source block — pins one URL for all
+        3. otherwise built from the effective city + price/area thresholds via
+           ``SourceClass.build_url`` (requires ``source_registry``)
+
+        Building by default is what makes ``city: katowice`` actually change
+        what gets scanned; without it the hardcoded Kraków URLs would win and
+        the setting would silently do nothing.
+        """
+        from .cities import get_city
+
         disabled = set(self.override.disabled_sources)
+        city = get_city(self.city_key())
         out: Dict[str, dict] = {}
         for name, sconf in (self.baseline.get("sources") or {}).items():
             if not sconf or not sconf.get("enabled", True):
@@ -148,9 +169,20 @@ class EffectiveConfig:
             if name in disabled:
                 continue
             merged = dict(sconf)
-            url_override = self.override.source_urls.get(name)
-            if url_override:
-                merged["url"] = url_override
+            url = (
+                self.override.source_urls.get(name)
+                or sconf.get("url")
+            )
+            if not url and source_registry:
+                cls = source_registry.get(name)
+                if cls is not None:
+                    url = cls.build_url(
+                        city,
+                        max_price=self.max_price(),
+                        min_area=self.min_area(),
+                    )
+            if url:
+                merged["url"] = url
             out[name] = merged
         return out
 
