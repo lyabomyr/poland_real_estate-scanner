@@ -32,11 +32,19 @@ filters:
     # panel-block / khrushchyovka-era buildings — prefab concrete, tiny rooms,
     # poor thermal performance. "wielka płyta" is the Polish name for the
     # 1960s-80s prefab style ("велика панель" in UA).
+    #
+    # These match the CONSTRUCTION TYPE, which is the thing we actually object
+    # to. Decade keywords ("z lat 60", "z lat 70") used to sit here and were
+    # moved to scoring.negative_keywords, because measured against the live
+    # Kraków market they were wrong in both directions:
+    #   - they miss real prefab: "blok z wielkiej płyty z 1987 roku"
+    #   - they reject good brick: "kameralnego, dwupiętrowego budynku
+    #     z cegły z lat 60." — a low-rise brick building, not a panel block
+    # A decade is a proxy; the material is the fact. Penalise the proxy in
+    # scoring, reject only on the fact.
     - "wielka płyta"
     - "wielkiej płyty"
     - "wielkopłyt"
-    - "z lat 60"
-    - "z lat 70"
     - "hruszcz"           # хрущовка / Khrushchyovka (rare in PL but harmless)
 
 telegram:
@@ -146,6 +154,13 @@ scoring:
     - "ostatnie piętr"                          # top floor — thermal issues under flat roof
     - "bez windy"                               # no elevator (bad for floor 3+)
     - "wysoki parter"                           # mezzanine — poor natural light
+    # Old-building decades. A penalty, NOT a hard reject: plenty of 1960s
+    # Kraków stock is low-rise brick and perfectly good, while actual prefab
+    # blocks run into the late 80s. filters.reject_keywords rejects on the
+    # construction type instead; these just push a listing down the ranking
+    # so you still see it and decide for yourself.
+    - { name: "z lat 60",        weight: 4 }
+    - { name: "z lat 70",        weight: 4 }
 
 storage:
   # State always lives in Turso — set TURSO_URL and TURSO_AUTH_TOKEN in the
@@ -172,6 +187,26 @@ sources:
   # To pin a URL by hand instead, add `url: "https://..."` to a source — an
   # explicit URL always wins over the generated one. Per-chat URL overrides
   # (dashboard → Chat config → advanced) win over both.
+  #
+  # `pages` — how many result pages to walk on a NORMAL run.
+  #
+  #   2 is deliberate, not lazy. Every source URL is sorted newest-first, so
+  #   on a 15-minute cron anything new is on page 1; page 2 is slack for a
+  #   burst. Raising this makes every run slower for no extra coverage.
+  #
+  #   The FIRST run against a URL ignores this cap and walks every page to
+  #   the end — otherwise the whole existing market (Kraków: ~16 pages on
+  #   otodom, ~16 on morizon) would never be looked at, only what gets
+  #   listed from now on. Which URLs have had that treatment is tracked in
+  #   the `swept_urls` table, so it happens exactly once per URL and repeats
+  #   automatically if you change city / max_price / min_area.
+  #
+  #   To force a re-sweep (say a portal changed its layout and you want the
+  #   back-catalogue re-read):
+  #       DELETE FROM swept_urls WHERE url LIKE '%otodom%';
+  #
+  #   Set `pages: 0` to make every run unlimited. Rarely what you want —
+  #   it costs ~40 fetches per source per run and finds nothing new.
   otodom:
     enabled: true
     pages: 2

@@ -2,7 +2,7 @@
 
 Multi-tenancy model
 -------------------
-The YAML file (``config.yml``) is the *baseline* — every chat starts with
+The YAML file (``config.example.yml``) is the *baseline* — every chat starts with
 those settings. Each chat then has an optional row in the ``chat_configs``
 table with an :class:`ChatOverride` JSON blob describing the fields it
 wants to override (max_price, disabled sources, extra keywords, per-source

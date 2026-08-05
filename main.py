@@ -42,7 +42,14 @@ from scanner.telegram import (
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Kraków real-estate scanner")
-    p.add_argument("--config", default="config.yml")
+    # One config file for every environment. It used to default to a local,
+    # gitignored config.yml while GitHub Actions passed config.example.yml,
+    # and the two silently drifted apart: local runs kept hard-rejecting
+    # "z lat 60", pinned every source URL (so changing `city` did nothing)
+    # and enabled a source that no longer exists. Secrets come from the
+    # environment, so a private copy buys nothing and costs correctness.
+    p.add_argument("--config", default="config.example.yml",
+                   help="YAML baseline config (default: config.example.yml)")
     p.add_argument("--dry-run", action="store_true",
                    help="don't send Telegram messages, don't persist state")
     p.add_argument("--print-chats", action="store_true",
@@ -64,7 +71,7 @@ def main() -> int:
     if not Path(args.config).exists():
         print(
             f"config file not found: {args.config}\n"
-            f"copy config.example.yml → config.yml and fill in your Telegram creds.",
+            f"run from the repo root, or pass --config <path>.",
             file=sys.stderr,
         )
         return 2
@@ -129,7 +136,7 @@ def main() -> int:
 
         chats = [c for c in repo.list_enabled() if not c.override.paused]
         if not chats:
-            log.info("no active chats — set telegram.chat_id in config.yml or add the bot to a group")
+            log.info("no active chats — set telegram.chat_id in config.example.yml or add the bot to a group")
             return 0
 
         contexts = [
@@ -155,7 +162,7 @@ def _handle_prune(cfg: dict, log: logging.Logger) -> int:
 
 def _handle_print_chats(bot_token: str, log: logging.Logger) -> int:
     if not bot_token or bot_token.startswith("REPLACE"):
-        print("bot_token not set in config.yml", file=sys.stderr)
+        print("bot_token not set — export TG_BOT_TOKEN", file=sys.stderr)
         return 2
     try:
         chats = discover_chats(bot_token)

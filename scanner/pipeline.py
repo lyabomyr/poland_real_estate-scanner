@@ -28,6 +28,7 @@ easy to unit-test.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import asdict, dataclass
 from logging import getLogger
 from typing import Dict, List, Optional
@@ -45,6 +46,23 @@ from .telegram import TelegramNotifier
 log = getLogger(__name__)
 
 
+def _reject_kind(reason: str) -> str:
+    """Collapse a per-listing reason into a countable category.
+
+    ``"price 843393 > 610000"`` and ``"price 727500 > 610000"`` are the same
+    story told twice; ``"keyword '(?<!\\w)udział'"`` is a different one.
+    """
+    if reason.startswith("keyword "):
+        parts = reason.split("'")
+        return f"keyword {parts[1]}" if len(parts) > 1 else "keyword"
+    return reason.split()[0] if reason else "unknown"
+
+
+def _fmt_rejects(counter: "Counter") -> str:
+    """``price ×120, keyword '(?<!\\w)udział' ×8`` — most common first."""
+    return ", ".join(f"{kind} ×{n}" for kind, n in counter.most_common())
+
+
 @dataclass
 class RunStats:
     """Global counters across every chat in one pipeline run."""
@@ -55,6 +73,10 @@ class RunStats:
     cross_dup: int = 0
     price_changed: int = 0  # re-notified because the price moved
     sent: int = 0
+    #: Messages we had ready but Telegram refused (or that were skipped
+    #: because no bot token is configured). Counted separately from `sent`
+    #: so a run that finds matches but delivers none can't read as success.
+    send_failed: int = 0
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -105,7 +127,18 @@ class MultiChatPipeline:
             matched = self._cross_source_dedup(ctx, matched)
             if ctx.scorer:
                 self._score(ctx, matched)
+            before_sent = self.stats.sent
+            before_failed = self.stats.send_failed
             self._emit(ctx, matched)
+            sent = self.stats.sent - before_sent
+            failed = self.stats.send_failed - before_failed
+            log.info("[%s] delivered %d message(s)", ctx.chat_id, sent)
+            if failed:
+                log.error(
+                    "[%s] %d message(s) could NOT be delivered — they stay "
+                    "unrecorded and will be retried next run",
+                    ctx.chat_id, failed,
+                )
             # Only now, with delivery done, is the first sweep of these URLs
             # safe to write off. A run killed mid-delivery leaves them
             # unmarked and sweeps them again, re-finding whatever was
@@ -127,6 +160,12 @@ class MultiChatPipeline:
         gets it emitted if chat_emissions doesn't have it yet.
         """
         matched: Dict[str, List[Listing]] = {}
+        # Why listings were dropped, aggregated for one INFO line per source.
+        # Individual rejects stay at DEBUG (thousands of them on a first
+        # sweep), but a run whose logs don't say *why* the market shrank is
+        # impossible to trust — this is the line that shows a filter has
+        # started eating everything.
+        rejects: Counter = Counter()
         for src in ctx.sources:
             first_sweep = bool(src.url) and not self.store.is_swept(src.url)
             if first_sweep:
@@ -139,6 +178,8 @@ class MultiChatPipeline:
                 )
             log.info("[%s] scanning %s", ctx.chat_id, src.name)
             matched[src.name] = []
+            before = (self.stats.seen, self.stats.rejected, self.stats.already_seen)
+            src_rejects: Counter = Counter()
             try:
                 for listing in src.scan():
                     self.stats.seen += 1
@@ -147,6 +188,7 @@ class MultiChatPipeline:
                         ok, reason = ctx.filter.accepts(listing)
                         if not ok:
                             log.debug("[%s] reject %s: %s", ctx.chat_id, listing.url, reason)
+                            src_rejects[_reject_kind(reason)] += 1
                             self.stats.rejected += 1
                             if not self.dry_run:
                                 self.store.add(listing, status="rejected", reject_reason=reason)
@@ -186,6 +228,26 @@ class MultiChatPipeline:
                 # back-catalogue, so leave the URL unmarked and sweep again
                 # next run rather than writing off the pages we never reached.
                 continue
+            seen = self.stats.seen - before[0]
+            rejected = self.stats.rejected - before[1]
+            known = self.stats.already_seen - before[2]
+            log.info(
+                "[%s] %s: %d seen (%d new, %d already known), %d rejected, "
+                "%d to notify%s",
+                ctx.chat_id, src.name, seen, seen - known, known, rejected,
+                len(matched[src.name]),
+                "  rejects: " + _fmt_rejects(src_rejects) if src_rejects else "",
+            )
+            if seen == 0:
+                # Not fatal — a portal can genuinely have nothing — but it is
+                # also what a silently broken parser or a bot-block looks
+                # like, so it should never pass unremarked.
+                log.warning(
+                    "[%s] %s returned no listings at all — check the URL or the parser",
+                    ctx.chat_id, src.name,
+                )
+            rejects.update(src_rejects)
+
             if first_sweep:
                 if src.scan_completed:
                     swept.append(src.url)
@@ -194,6 +256,8 @@ class MultiChatPipeline:
                         "[%s] %s: first sweep was cut short — will retry next run",
                         ctx.chat_id, src.name,
                     )
+        if rejects:
+            log.info("[%s] rejects this run: %s", ctx.chat_id, _fmt_rejects(rejects))
         return matched
 
     def _note_price_change(self, listing: Listing) -> None:
@@ -269,17 +333,26 @@ class MultiChatPipeline:
                     self.stats.matched += item.size
                     print(format_group_plain(item))
                     print("-" * 60)
-                    if not self.dry_run and ctx.notifier.send_group(item):
+                    if self.dry_run:
+                        continue
+                    if ctx.notifier.send_group(item):
                         self.stats.sent += 1
                         for l in item.items:
                             self.repo.record_emission(ctx.chat_id, l.dedup_key, l.price)
+                    else:
+                        # Not recorded as emitted, so the next run retries it.
+                        self.stats.send_failed += 1
                 else:
                     self.stats.matched += 1
                     print(format_plain(item))
                     print("-" * 60)
-                    if not self.dry_run and ctx.notifier.send(item):
+                    if self.dry_run:
+                        continue
+                    if ctx.notifier.send(item):
                         self.stats.sent += 1
                         self.repo.record_emission(ctx.chat_id, item.dedup_key, item.price)
+                    else:
+                        self.stats.send_failed += 1
 
 
 # ── context builder ────────────────────────────────────────────────────

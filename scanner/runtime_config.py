@@ -1,9 +1,9 @@
 """Runtime config loading + environment overrides.
 
-Local development typically uses ``config.yml`` copied from
-``config.example.yml``. Deployment targets can instead load the tracked
-template and inject secrets / public URLs through environment variables, so
-we never have to render credentials into a temporary file.
+``config.example.yml`` is the single baseline for every environment —
+local, GitHub Actions and the dashboard all load the same file. Secrets and
+public URLs are injected from environment variables on top, so credentials
+never have to be written into a config file.
 """
 
 from __future__ import annotations
@@ -22,15 +22,15 @@ def load_yaml_config(path: str | Path) -> dict:
 
 
 def load_runtime_config(
-    path: str | Path = "config.yml",
+    path: str | Path = "config.example.yml",
     *,
     fallback_path: str | Path | None = None,
     env: Optional[Mapping[str, str]] = None,
 ) -> dict:
     """Load YAML config, optionally falling back to a tracked template.
 
-    ``fallback_path`` is useful for deployments where secrets come from env
-    vars and we don't want to materialise a separate ``config.yml`` file.
+    ``fallback_path`` covers callers that point at a custom config and want a
+    graceful degrade to the tracked baseline.
     """
     cfg_path = Path(path)
     if cfg_path.exists():

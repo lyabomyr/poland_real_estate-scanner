@@ -113,7 +113,11 @@ make dry
 
 ## Config discipline
 
-`config.example.yml` is authoritative.
+`config.example.yml` is authoritative — and it is the **only** config file.
+`main.py --config` defaults to it, GitHub Actions passes it explicitly, and
+`dashboard/db.py` reads it for the "default from …" captions. Do not
+reintroduce a local `config.yml`: that layout existed, silently drifted, and
+produced a local scanner that filtered differently from the deployed one.
 
 When you add a knob:
 

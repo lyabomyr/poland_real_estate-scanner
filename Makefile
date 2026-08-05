@@ -8,7 +8,7 @@ SELECT_PY := ./scripts/select_python.sh
 
 # There is no reset-db target: the dedup store is the shared Turso database,
 # never a local file, so wiping it is not a local operation.
-.PHONY: help install run dry config clean test lint chats prune greet \
+.PHONY: help install run dry clean test lint chats prune greet \
         pin-dashboard dashboard check-dashboard-deps boot-check
 
 help:
@@ -23,31 +23,25 @@ install: $(PY)  ## create .venv and install runtime + dev dependencies
 	$(PIP) install --quiet -r requirements-dev.txt
 	@echo "installed into $(VENV)"
 
-config:
-	@if [ ! -f config.yml ]; then \
-		cp config.example.yml config.yml; \
-		echo "created config.yml from example — edit it to add Telegram credentials"; \
-	fi
-
-run: config  ## run the scanner (prints matches + sends to Telegram if configured)
+run:  ## run the scanner (prints matches + sends to Telegram if configured)
 	$(PY) main.py
 
-dry: config  ## dry run — print matches, don't touch DB, don't send Telegram
+dry:  ## dry run — print matches, don't touch DB, don't send Telegram
 	$(PY) main.py --dry-run
 
-chats: config  ## list chats the bot has recently seen (for picking chat_id)
+chats:  ## list chats the bot has recently seen (for picking chat_id)
 	$(PY) main.py --print-chats
 
-greet: config  ## announce chat_id in every chat the bot has newly joined
+greet:  ## announce chat_id in every chat the bot has newly joined
 	$(PY) main.py --greet-chats
 
-pin-dashboard: config  ## (re)post + pin the dashboard link in every chat
+pin-dashboard:  ## (re)post + pin the dashboard link in every chat
 	$(PY) main.py --pin-dashboard
 
-prune: config  ## archive + delete rejected rows older than storage.prune_rejected_days
+prune:  ## archive + delete rejected rows older than storage.prune_rejected_days
 	$(PY) main.py --prune
 
-dashboard: config  ## run the Streamlit dashboard locally on :8501
+dashboard:  ## run the Streamlit dashboard locally on :8501
 	$(VENV)/bin/streamlit run dashboard/app.py
 
 lint:  ## static-check for unused imports / undefined names

@@ -70,6 +70,70 @@ class PageCapTests(unittest.TestCase):
         self.assertEqual([1, 2, 3, 4, 5], src.fetched)
 
 
+class PaginationEndTests(unittest.TestCase):
+    """The two ways a walk ends that are NOT failures."""
+
+    def test_404_past_the_last_page_counts_as_a_complete_walk(self) -> None:
+        """Morizon answers the page after the last one with a 404.
+
+        Treating that as a fetch failure would leave the sweep unmarked, so
+        the full walk would repeat on every single run, forever.
+        """
+        import requests
+
+        src = _FakeSource(total_pages=3)
+        src.pages = 0
+        original = src.fetch
+
+        def fetch(url):
+            page = int(url.rsplit("page=", 1)[1]) if "page=" in url else 1
+            if page > 3:
+                response = requests.Response()
+                response.status_code = 404
+                raise requests.HTTPError(response=response)
+            return original(url)
+
+        src.fetch = fetch
+        self.assertEqual(9, len(list(src.scan())))
+        self.assertTrue(src.scan_completed)
+
+    def test_a_404_on_the_very_first_page_is_still_a_failure(self) -> None:
+        """Page 1 missing means the URL is broken, not that we ran out."""
+        import requests
+
+        src = _FakeSource(total_pages=3)
+
+        def fetch(url):
+            response = requests.Response()
+            response.status_code = 404
+            raise requests.HTTPError(response=response)
+
+        src.fetch = fetch
+        self.assertEqual([], list(src.scan()))
+        self.assertFalse(src.scan_completed)
+
+    def test_a_source_that_ignores_page_stops_after_one_repeat(self) -> None:
+        """Komornik serves page 1 no matter what ?page= says.
+
+        Left unchecked, an unlimited sweep refetches the same rows MAX_PAGES
+        times and reports them as a market's worth of listings.
+        """
+        src = _FakeSource(total_pages=1)
+        src.pages = 0
+        original = src.fetch
+
+        def fetch(url):
+            original(url)  # keep `fetched` tracking intact
+            return "1"     # every page is page 1
+
+        src.fetch = fetch
+
+        listings = list(src.scan())
+        self.assertEqual(3, len(listings), "duplicates must not be re-yielded")
+        self.assertEqual(2, len(src.fetched), "should stop right after the repeat")
+        self.assertTrue(src.scan_completed)
+
+
 class _Store:
     """Minimal SeenStore stand-in for the sweep bookkeeping."""
 

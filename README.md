@@ -235,9 +235,7 @@ system `python3` is older.
 
 ```bash
 make install
-cp .env.example .env        # fill in TURSO_URL + TURSO_AUTH_TOKEN
-cp config.example.yml config.yml
-# fill telegram.bot_token if you want local polling / manual sends
+cp .env.example .env        # fill in TURSO_URL + TURSO_AUTH_TOKEN + TG_BOT_TOKEN
 
 make dry
 make run
@@ -245,6 +243,17 @@ make prune
 make chats
 make greet
 ```
+
+There is deliberately **one** config file. `config.example.yml` is what runs
+everywhere — locally, on GitHub Actions and behind the dashboard's "default"
+captions. Secrets never go in it; they come from the environment
+(`.env` locally, repo secrets in Actions).
+
+An earlier layout copied it to a gitignored `config.yml` for local use, and
+the two drifted: the local copy kept hard-rejecting `z lat 60`, pinned every
+source URL so changing `city` did nothing, and enabled a source that had been
+removed. If you still have a `config.yml`, it is no longer read — delete it,
+especially if you ever put a bot token in it.
 
 Note: `make chats` and `make greet` read `getUpdates`, the same channel the
 scanner drains. Running them locally consumes updates the next scheduled scan

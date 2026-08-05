@@ -98,11 +98,23 @@ class BaseSource:
         self.scan_completed = False
         unlimited = self.pages <= 0
         last = self.MAX_PAGES if unlimited else self.pages
+        seen_ids: set[str] = set()
         for page in range(1, last + 1):
             url = self._page_url(page)
             log.info("%s: fetching page %d", self.name, page)
             try:
                 html = self.fetch(url)
+            except requests.HTTPError as e:
+                status = e.response.status_code if e.response is not None else None
+                if page > 1 and status in (404, 410):
+                    # Walking off the end of the result set. Morizon answers
+                    # the page after the last one with a 404 rather than an
+                    # empty list, and that is a completed walk, not a failure.
+                    log.info("%s: page %d is past the last page (%s)", self.name, page, status)
+                    self.scan_completed = True
+                    return
+                log.error("%s: fetch failed for %s: %s", self.name, url, e)
+                return
             except Exception as e:
                 # Deliberately not re-raised: one flaky portal must not abort
                 # the whole run. scan_completed stays False so a caller doing
@@ -110,11 +122,31 @@ class BaseSource:
                 log.error("%s: fetch failed for %s: %s", self.name, url, e)
                 return
             got = 0
+            fresh = 0
             for listing in self._parse(html):
                 got += 1
+                # Only yield ids we haven't already handed out in this scan.
+                # On a well-behaved portal nothing repeats and this is a
+                # no-op; it matters for sources that ignore ?page= and for
+                # listings that shift across a page boundary mid-walk.
+                if listing.id in seen_ids:
+                    continue
+                seen_ids.add(listing.id)
+                fresh += 1
                 yield listing
-            log.info("%s: page %d yielded %d listings", self.name, page, got)
+            log.info("%s: page %d yielded %d listings (%d new)", self.name, page, got, fresh)
             if got == 0:
+                self.scan_completed = True
+                return
+            if fresh == 0:
+                # Every id repeats one we already have, so this source ignores
+                # our page parameter and is serving page 1 forever. Komornik
+                # does exactly this. Without the check an unlimited sweep
+                # would refetch the same 20 rows MAX_PAGES times.
+                log.info(
+                    "%s: page %d repeated the previous results — pagination "
+                    "is not supported here, stopping", self.name, page,
+                )
                 self.scan_completed = True
                 return
             self._sleep()
