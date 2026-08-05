@@ -161,6 +161,27 @@ class PaginationEndTests(unittest.TestCase):
         self.assertTrue(src.scan_completed)
 
 
+class RetryPolicyTests(unittest.TestCase):
+    """A transient 5xx must not cost us a whole source for the run."""
+
+    def _retry(self):
+        src = BaseSource(url="https://example.test/", user_agent="t")
+        return src.session.get_adapter("https://example.test/").max_retries
+
+    def test_transient_server_errors_are_retried(self) -> None:
+        forced = self._retry().status_forcelist
+        for status in (429, 500, 502, 503, 504):
+            self.assertIn(status, forced)
+
+    def test_403_is_never_retried(self) -> None:
+        """That's Otodom's bot-shield; hammering it only looks more like a bot."""
+        self.assertNotIn(403, self._retry().status_forcelist)
+
+    def test_final_status_still_reaches_raise_for_status(self) -> None:
+        """raise_on_status=False, so fetch() reports the real code, not MaxRetryError."""
+        self.assertFalse(self._retry().raise_on_status)
+
+
 class _Store:
     """Minimal SeenStore stand-in for the sweep bookkeeping."""
 

@@ -4,11 +4,16 @@ from typing import Iterable, Optional
 from urllib.parse import quote
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from ..cities import City
 from ..models import Listing
 
 log = logging.getLogger(__name__)
+
+#: Attempts per page before a source is considered down for this run.
+RETRY_ATTEMPTS = 3
 
 
 class BaseSource:
@@ -81,6 +86,28 @@ class BaseSource:
             "User-Agent": user_agent,
             "Accept-Language": "pl,en;q=0.8",
         })
+        self._install_retries()
+
+    def _install_retries(self) -> None:
+        """Retry transient server-side failures before giving up on a source.
+
+        A single hiccup used to end a source's whole walk: we lost an entire
+        OLX scan to one 504. Retried statuses are strictly the transient
+        ones — a 403 is Otodom's bot-shield and retrying it just burns
+        requests (and looks more like a bot), so it is deliberately absent.
+
+        backoff_factor=1 gives 0s / 2s / 4s between attempts.
+        """
+        retry = Retry(
+            total=RETRY_ATTEMPTS,
+            backoff_factor=1,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset(["GET"]),
+            raise_on_status=False,   # let raise_for_status() report the final code
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
 
     # --- public --------------------------------------------------------
 
