@@ -1,20 +1,28 @@
 # Dependencies for Streamlit Community Cloud (dashboard/app.py).
 #
-# Streamlit Cloud picks requirements.txt over pyproject.toml, so this file is
-# what the hosted dashboard installs from. It exists for two reasons:
+# Streamlit Cloud installs from THIS file, not pyproject.toml. Two rules:
 #
-#   1. Pure-Python only. No compiled extensions, so the build can't break on
-#      whatever CPython version the platform happens to run. (This bit us
-#      once: libsql-experimental ships no cp314 wheel, Streamlit Cloud runs
-#      CPython 3.14, pip tried a source build and the Rust step failed. We
-#      now reach Turso over its HTTP API instead — see scanner/turso_http.py.)
-#   2. Dashboard-only surface. beautifulsoup4 is scanner-only and not needed
-#      to render charts.
+#   1. Pure-Python only — every package here must ship a `py3-none-any`
+#      wheel, so the build can't break on whatever CPython version the
+#      platform happens to run. This bit us once: libsql-experimental has
+#      no cp314 wheel, Streamlit Cloud runs CPython 3.14, pip attempted a
+#      source build and the Rust step failed. Turso is now reached over its
+#      HTTP API instead (scanner/turso_http.py) with no compiled driver.
+#
+#   2. Must cover everything the dashboard imports *transitively*. That is
+#      easy to get wrong: the dashboard imports scanner.introspection ->
+#      scanner.registry -> every source class -> bs4. beautifulsoup4 looks
+#      like a scanner-only dependency but the dashboard needs it to render
+#      source URLs and the decision tree.
+#
+# `make check-dashboard-deps` verifies rule 2 in an isolated venv — run it
+# after touching imports, because a local Poetry env has extra packages
+# installed and will happily hide a gap here.
 #
 # pyproject.toml stays the source of truth for local dev and GitHub Actions.
-# Keep the two in sync when you add something the dashboard imports.
 streamlit>=1.61,<2.0
 pandas>=3.0,<4.0
 plotly>=6.9,<7.0
 requests>=2.31,<3.0
 PyYAML>=6.0,<7.0
+beautifulsoup4>=4.12,<5.0

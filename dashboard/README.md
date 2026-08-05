@@ -38,6 +38,16 @@ Without the two `TURSO_*` vars set, `db.py` falls back to a local
    ```
 5. Deploy.
 
+Before deploying, verify the dependency list is complete:
+
+```bash
+make check-dashboard-deps
+```
+
+That builds a venv from `requirements.txt` alone and imports every dashboard
+module — reproducing Streamlit Cloud, where a missing package shows up as a
+`ModuleNotFoundError` on a live page rather than at build time.
+
 Dependencies come from the repo-root [`requirements.txt`](../requirements.txt),
 which Streamlit Cloud prefers over `pyproject.toml`. It is deliberately
 **pure-Python** — no compiled extensions — so the build cannot break on

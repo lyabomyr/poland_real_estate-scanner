@@ -1,0 +1,49 @@
+name: ci
+
+# Runs on every push and PR. Two jobs, because the two runtimes install
+# dependencies from different files and each has its own failure mode:
+#
+#   * tests           — Poetry / pyproject.toml, what GitHub Actions runs
+#   * dashboard-deps  — requirements.txt alone, what Streamlit Cloud installs
+#
+# The second exists because a local Poetry env has the scanner's packages
+# installed and will happily import the dashboard even when requirements.txt
+# is missing something. That gap only shows up as a ModuleNotFoundError on a
+# deployed page — which is exactly how `bs4` slipped through once.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Poetry
+        run: pipx install poetry
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pypoetry/virtualenvs
+          key: poetry-${{ runner.os }}-${{ hashFiles('poetry.lock') }}
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-root
+      - name: Lint
+        run: poetry run pyflakes scanner/ main.py tests dashboard
+      - name: Unit tests
+        run: poetry run python -m unittest discover -s tests -v
+
+  dashboard-deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: requirements.txt covers every dashboard import
+        run: ./scripts/check_dashboard_deps.sh

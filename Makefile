@@ -27,6 +27,9 @@ chats: config  ## list chats the bot has recently seen (for picking chat_id)
 prune: config  ## archive + delete rejected rows older than storage.prune_rejected_days
 	poetry run python main.py --prune
 
+check-dashboard-deps:  ## verify requirements.txt covers every dashboard import
+	./scripts/check_dashboard_deps.sh
+
 lint:  ## static-check for unused imports / undefined names
 	poetry run pyflakes scanner/ main.py tests
 
