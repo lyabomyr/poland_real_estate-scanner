@@ -213,19 +213,51 @@ def _register_chat(chat_id, title, repo: ChatConfigRepo, log: logging.Logger) ->
 
 
 def _bootstrap_from_yaml_if_empty(cfg: dict, repo: ChatConfigRepo, log: logging.Logger) -> None:
-    """Seed ``chat_configs`` from ``telegram.chat_id`` on first run.
+    """Guarantee at least one destination.
 
-    Prevents "why does the scanner do nothing on a fresh DB?" — if the user
-    put a chat_id in YAML but never DMed the bot (no getUpdates event),
-    still route matches to it. Uses :func:`_register_chat` so the historical
-    backlog gets backfilled and the first scan doesn't spam.
+    Priority order:
+
+    1. If **any** row in ``chat_configs`` is ``enabled=1`` and not ``paused`` —
+       do nothing. Multi-tenant setup wins.
+    2. Otherwise fall back to ``telegram.chat_id`` from YAML (which comes
+       from ``TG_CHAT_ID`` in the workflow secrets). Semantics:
+
+       * Row missing → register it and backfill emissions (so no spam).
+       * Row exists but ``enabled=0`` or ``paused`` → re-enable + un-pause
+         so the fallback actually receives matches.
+
+    This keeps the pre-multi-tenant behaviour available: even if every
+    per-chat row is disabled, the "canonical" chat from secrets still gets
+    the notifications.
     """
-    if repo.list_all():
+    active = [
+        c for c in repo.list_all() if c.enabled and not c.override.paused
+    ]
+    if active:
         return
+
     chat_id = ((cfg.get("telegram") or {}).get("chat_id") or "").strip()
     if not chat_id or chat_id.startswith("REPLACE"):
         return
-    _register_chat(chat_id, "bootstrap (from YAML)", repo, log)
+
+    row = repo.get(chat_id)
+    if row is None:
+        _register_chat(chat_id, "fallback (from YAML)", repo, log)
+        return
+
+    # Row exists but nobody's listening — nudge it back on.
+    override = row.override
+    changed = []
+    if override.paused:
+        override.paused = False
+        changed.append("un-paused")
+    repo.upsert(chat_id, row.title, override, enabled=True)
+    if not row.enabled:
+        changed.append("re-enabled")
+    log.info(
+        "fallback: chat_id=%s reactivated from YAML (%s)",
+        chat_id, ", ".join(changed) or "already active",
+    )
 
 
 if __name__ == "__main__":
