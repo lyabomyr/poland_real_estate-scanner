@@ -190,10 +190,26 @@ def _greet_new_chats(
             continue
         if send_greeting(bot_token, cid, c["title"]):
             store.record_greeted(cid, c["title"])
-            # Auto-register with empty overrides (inherits everything from YAML).
-            if not repo.get(cid):
-                repo.upsert(cid, c["title"], ChatOverride(), enabled=True)
-            log.info("greet: announced + registered chat_id=%s (%s)", cid, c["title"])
+            _register_chat(cid, c["title"], repo, log)
+            log.info("greet: announced chat_id=%s (%s)", cid, c["title"])
+
+
+def _register_chat(chat_id, title, repo: ChatConfigRepo, log: logging.Logger) -> None:
+    """Register a chat + backfill emissions.
+
+    Backfilling ``chat_emissions`` from the current ``seen`` snapshot means
+    the chat's *first* scan won't dump 100+ historical apartments on it —
+    users adding the bot expect fresh matches going forward, not the
+    archive. Idempotent: no-op if the chat is already registered.
+    """
+    if repo.get(chat_id):
+        return
+    repo.upsert(chat_id, title, ChatOverride(), enabled=True)
+    n = repo.backfill_emissions_from_seen(chat_id)
+    log.info(
+        "registered chat_id=%s (%s) + backfilled %d historical emissions",
+        chat_id, title, n,
+    )
 
 
 def _bootstrap_from_yaml_if_empty(cfg: dict, repo: ChatConfigRepo, log: logging.Logger) -> None:
@@ -201,15 +217,15 @@ def _bootstrap_from_yaml_if_empty(cfg: dict, repo: ChatConfigRepo, log: logging.
 
     Prevents "why does the scanner do nothing on a fresh DB?" — if the user
     put a chat_id in YAML but never DMed the bot (no getUpdates event),
-    still route matches to it.
+    still route matches to it. Uses :func:`_register_chat` so the historical
+    backlog gets backfilled and the first scan doesn't spam.
     """
     if repo.list_all():
         return
     chat_id = ((cfg.get("telegram") or {}).get("chat_id") or "").strip()
     if not chat_id or chat_id.startswith("REPLACE"):
         return
-    repo.upsert(chat_id, title="bootstrap (from YAML)", override=ChatOverride(), enabled=True)
-    log.info("bootstrap: registered chat_id=%s from config.yml", chat_id)
+    _register_chat(chat_id, "bootstrap (from YAML)", repo, log)
 
 
 if __name__ == "__main__":

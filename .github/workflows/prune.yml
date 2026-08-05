@@ -60,8 +60,19 @@ jobs:
 
       - name: Commit archive CSVs
         run: |
+          if git diff --quiet datasets/ 2>/dev/null && [ -z "$(git ls-files --others --exclude-standard datasets/)" ]; then
+            echo "no archive changes — nothing to commit"
+            exit 0
+          fi
           git config user.name  "scanner-bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add datasets/
-          git diff --cached --quiet || git commit -m "monthly prune: archive rejected rows [skip ci]"
-          git push
+          git diff --cached --quiet && exit 0
+          git commit -m "monthly prune: archive rejected rows [skip ci]"
+          # Race-safe: another workflow may have landed a commit while we ran.
+          # Rebase + retry a few times before giving up.
+          for i in 1 2 3; do
+            git pull --rebase origin main && git push && exit 0
+            sleep $((i * 5))
+          done
+          echo "push failed after 3 attempts" && exit 1

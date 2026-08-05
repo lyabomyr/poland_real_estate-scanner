@@ -101,6 +101,29 @@ class ChatConfigRepo:
         )
         self.store.conn.commit()
 
+    def backfill_emissions_from_seen(self, chat_id) -> int:
+        """Mark every ``status='matched'`` listing as already-emitted to this chat.
+
+        Called when a chat is first registered — otherwise the *very first*
+        scan for that chat would flood it with the whole historical backlog
+        (100+ apartments). New chats should get *future* matches, not the
+        archive.
+
+        Returns approximate row count. libSQL doesn't report ``rowcount``
+        reliably for INSERT-OR-IGNORE, so we count first and insert second.
+        """
+        cur = self.store.conn.execute(
+            "SELECT COUNT(*) FROM seen WHERE status='matched'"
+        )
+        expected = int(cur.fetchone()[0])
+        self.store.conn.execute(
+            "INSERT OR IGNORE INTO chat_emissions (chat_id, listing_key) "
+            "SELECT ?, key FROM seen WHERE status='matched'",
+            (str(chat_id),),
+        )
+        self.store.conn.commit()
+        return expected
+
     def emitted_fuzzy_keys(self, chat_id) -> set:
         """Fuzzy keys already emitted to this specific chat — for per-chat
         cross-source dedup (analogue of :meth:`SeenStore.emitted_fuzzy_keys`
