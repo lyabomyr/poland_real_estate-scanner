@@ -38,6 +38,22 @@ MAX_RATE_LIMIT_WAIT_SECONDS = 30
 #: monopolise the run.
 RATE_LIMIT_ATTEMPTS = 3
 
+#: Seconds to leave between messages to one chat. 3 s is 20/min, which is
+#: Telegram's documented per-group ceiling.
+#:
+#: Measured before this existed: bursts reached 79/min and long runs settled
+#: near 23/min, so pacing is slightly slower on paper (2.29 s/message
+#: observed vs 3.00 s enforced). It buys predictability instead — 2.4% of
+#: messages were hitting a 429 and paying a 30-44 s stall, and delivery is
+#: nowhere near the binding constraint anyway: the longest drain took 4m25s
+#: inside a 15-minute job.
+SEND_INTERVAL_SECONDS = 3.0
+
+#: After a 429 the pace doubles for the rest of the run, up to this. Telegram
+#: only refuses when its own accounting says we are over, so the honest
+#: response is to slow down and stay slowed rather than walk back into it.
+MAX_SEND_INTERVAL_SECONDS = 12.0
+
 
 def default_reply_keyboard() -> dict:
     """Persistent reply keyboard shown below the chat's input field.
@@ -343,10 +359,19 @@ class TelegramNotifier:
     rate limits.
     """
 
-    def __init__(self, bot_token: str, chat_id: str, parse_mode: str = "HTML"):
+    def __init__(
+        self,
+        bot_token: str,
+        chat_id: str,
+        parse_mode: str = "HTML",
+        send_interval: float = SEND_INTERVAL_SECONDS,
+    ):
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.parse_mode = parse_mode
+        #: Grows on a 429 and never shrinks within a run — see _pace().
+        self._interval = float(send_interval)
+        self._last_sent: Optional[float] = None
 
     def is_configured(self) -> bool:
         return (
@@ -364,10 +389,19 @@ class TelegramNotifier:
         # A group has many URLs; link previews would visually explode the message.
         return self._post(text=format_group_html(g), preview=False, tag=f"group:{g.label}")
 
+    def _pace(self) -> None:
+        """Wait out the send interval. No-op before the first message."""
+        if self._last_sent is None or self._interval <= 0:
+            return
+        remaining = self._interval - (time.monotonic() - self._last_sent)
+        if remaining > 0:
+            time.sleep(remaining)
+
     def _post(self, text: str, preview: bool, tag: str, attempt: int = 1) -> bool:
         if not self.is_configured():
             log.warning("telegram not configured; %s was not sent", tag)
             return False
+        self._pace()
         try:
             r = requests.post(
                 f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
@@ -382,6 +416,7 @@ class TelegramNotifier:
             if r.status_code == 429:
                 return self._wait_out_rate_limit(r, text, preview, tag, attempt)
             r.raise_for_status()
+            self._last_sent = time.monotonic()
             return True
         except Exception as e:
             log.error("telegram send failed for %s: %s", tag, e)
@@ -401,6 +436,13 @@ class TelegramNotifier:
         never retried indefinitely. Bounded iteration rather than the
         recursion this used to do, which could nest a frame per retry.
         """
+        # Telegram refused, so our pace was too fast. Back off for the rest
+        # of the run instead of returning to the same rate and being refused
+        # again — each refusal costs far more than the slower pace does.
+        if self._interval < MAX_SEND_INTERVAL_SECONDS:
+            self._interval = min(self._interval * 2, MAX_SEND_INTERVAL_SECONDS)
+            log.info("telegram: backing off to %.0fs between messages", self._interval)
+
         retry = int((response.json().get("parameters") or {}).get("retry_after", 5))
         if retry > MAX_RATE_LIMIT_WAIT_SECONDS or attempt >= RATE_LIMIT_ATTEMPTS:
             log.warning(

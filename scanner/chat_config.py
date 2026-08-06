@@ -154,6 +154,11 @@ class EffectiveConfig:
             or (self.baseline.get("notifications") or {}).get("min_group_size", 3)
         )
 
+    def send_interval(self) -> float:
+        """Seconds between messages to one chat. Baseline-only; 0 disables."""
+        raw = (self.baseline.get("notifications") or {}).get("send_interval_seconds")
+        return 3.0 if raw is None else float(raw)
+
     def dashboard_url(self) -> Optional[str]:
         url = ((self.baseline.get("notifications") or {}).get("dashboard_url") or "").strip()
         return url or None

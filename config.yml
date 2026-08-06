@@ -135,6 +135,19 @@ notifications:
   #   only "city, district", so their listings almost never group at all.
   min_group_size: 3
 
+  # Seconds to leave between messages to one chat. 3 s = 20/min, Telegram's
+  # documented per-group ceiling, so we stay under it instead of discovering
+  # it via 429s. After a 429 the pace doubles for the rest of the run (up to
+  # 12 s) rather than walking straight back into the same refusal.
+  #
+  # Measured with no pacing: bursts hit 79/min, long runs settled near
+  # 23/min, and 2.4% of messages paid a 30-44 s stall. Pacing is marginally
+  # slower on paper and far more predictable. Delivery is not the bottleneck
+  # either way — the longest drain was 4m25s inside a 15-minute job.
+  #
+  # Set 0 to send as fast as Telegram allows and handle 429s reactively.
+  send_interval_seconds: 3
+
   # Public URL of the Streamlit dashboard (deployed on Streamlit Community
   # Cloud). Surfaced in /help, /status, /dashboard, and the greeting so
   # users can jump to the UI. Leave empty / null if you don't run one.

@@ -61,6 +61,7 @@ def build_effective_snapshot(baseline_cfg: dict, override: ChatOverride) -> dict
 
     notifications = deepcopy(baseline_cfg.get("notifications") or {})
     notifications["min_group_size"] = ec.min_group_size()
+    notifications["send_interval_seconds"] = ec.send_interval()
     notifications["dashboard_url"] = ec.dashboard_url()
 
     search = deepcopy(baseline_cfg.get("search") or {})

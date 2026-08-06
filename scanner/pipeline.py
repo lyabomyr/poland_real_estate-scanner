@@ -363,7 +363,22 @@ class MultiChatPipeline:
     def _cross_source_dedup(
         self, ctx: ChatContext, matched: Dict[str, List[Listing]]
     ) -> Dict[str, List[Listing]]:
-        """Per-chat cross-source dedup: same apartment on multiple platforms → one msg."""
+        """Per-chat cross-source dedup: same apartment on multiple platforms → one msg.
+
+        Dropping a duplicate is only half the job — the decision has to be
+        *recorded*, or the listing sits in the delivery backlog and is
+        re-decided on every future run. That is exactly what happened: 111
+        listings, all genuine twins of flats already sent, produced
+        "backlog: 111 … delivered 0" run after run. Nothing was lost (the
+        user had seen each flat via the other portal) but the queue could
+        never drain, and a permanently stuck 111 would hide a listing that
+        was genuinely stuck.
+
+        So a dropped twin gets an emission row. It is honest: this chat has
+        been told about the apartment, just under the other portal's key.
+        Per-chat rather than a global ``seen.status='duplicate'`` — another
+        chat may not have received the twin, and must still get it.
+        """
         emitted_fk = set() if self.dry_run else self.repo.emitted_fuzzy_keys(ctx.chat_id)
         out: Dict[str, List[Listing]] = {}
         for src_name, listings in matched.items():
@@ -372,6 +387,8 @@ class MultiChatPipeline:
                 fk = l.fuzzy_key
                 if fk and fk in emitted_fk:
                     self.stats.cross_dup += 1
+                    if not self.dry_run:
+                        self.repo.record_emission(ctx.chat_id, l.dedup_key, l.price)
                     continue
                 if fk:
                     emitted_fk.add(fk)
@@ -474,6 +491,7 @@ def build_chat_context(
         bot_token=bot_token,
         chat_id=row.chat_id,
         parse_mode=ec.parse_mode(),
+        send_interval=ec.send_interval(),
     )
 
     return ChatContext(
