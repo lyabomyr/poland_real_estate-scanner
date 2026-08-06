@@ -253,5 +253,9 @@ regression will hide behind:
   rather than pretended.
 - **`komornik.pl` has no working pagination.** We stop after detecting the
   repeat. Its whole Kraków inventory is ~20 listings, so nothing is missed.
+- **A red GitHub run is often GitHub.** "Failed to resolve action download
+  info" and "job was not acquired by Runner" both fail before Python starts.
+  A skipped run costs nothing — the backlog means the next one resumes — so
+  neither is a reason to change the workflow. See AGENT.md.
 - **Rate limiting is Telegram's, not ours.** There is no fixed pacing delay.
   A large backlog drains over several runs by design.

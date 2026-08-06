@@ -134,6 +134,31 @@ the only one that cannot be noticed in normal use:
 A crash is fine; it gets noticed and fixed. Silence is what costs the user a
 flat they wanted.
 
+### A failed workflow run is usually not a bug
+
+Before investigating a red run, check *where* it failed. Two GitHub-side
+modes look alarming and mean nothing about this repo — the job never got as
+far as running Python:
+
+```
+Set up job:  Failed to resolve action download info. Error: Service Unavailable
+             -> GitHub could not serve actions/checkout. Nothing ran.
+
+Annotations: The job was not acquired by Runner of type hosted
+             -> no runner was ever assigned. The duration shown (e.g. 15m 3s)
+                is GitHub retrying, not our timeout-minutes.
+```
+
+Both happened on 2026-08-06 (#26, #27) and cost nothing: deliveries continued
+on the next scheduled run and the queue kept draining (508 -> 108 across the
+day). That is the delivery backlog doing its job — a skipped run is free,
+because what to send is read from the database, not from what a scan saw.
+
+So: do **not** raise `timeout-minutes`, add retries, or restructure the
+workflow in response to these. A run that genuinely overruns looks different
+— it reaches the "Run scanner" step and its logs show the scan working.
+Healthy runs take 2-3 minutes.
+
 ## Config discipline
 
 `config.yml` is authoritative, tracked in git, and the **only** config file.
