@@ -48,7 +48,7 @@ def default_reply_keyboard() -> dict:
     instead of hiding it behind the tiny "keyboard" icon.
 
     Tapping a button is not instant: commands are drained by the scheduled
-    scan, so the answer arrives within one interval (15 min by default).
+    scan, and GitHub throttles those heavily — expect an hour or two.
     """
     return {
         "keyboard": [
@@ -140,10 +140,10 @@ def send_greeting(
         f"{title_line}\n\n"
         f"Chat ID: <code>{chat_id}</code>\n"
         "This chat is registered — new matches will start arriving here.\n\n"
-        "⏱ <b>Commands take up to 15 minutes.</b>\n"
-        "The bot reads them during its scheduled scan, which runs every "
-        "15 min, so your message waits for the next run. Send /help for "
-        "the command list."
+        "⏱ <b>Commands are not instant — often an hour or two.</b>\n"
+        "They are read during the scheduled scan, and GitHub throttles free "
+        "scheduled runs. Nothing is lost; your command waits for the next "
+        "one. Send /help for the command list."
         f"{dashboard_line}"
     )
     try:

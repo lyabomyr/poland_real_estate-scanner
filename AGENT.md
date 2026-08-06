@@ -13,21 +13,30 @@ The scanner is correct only if all of this stays true:
 - dedup still works across same-source, cross-source, and grouped bulk listings
 - Telegram commands reflect the **same effective runtime config** the scanner
   uses
-- command replies are honest about latency: they arrive within one scan
-  interval (15 min), and `/help` + the greeting say so
+- command replies are honest about latency. They arrive on the next
+  scheduled run, and that is **not** 15 minutes: GitHub throttles free
+  scheduled workflows and drops most of them (measured: 14 runs in 24 h,
+  average gap 115 min, worst 226). `/help` and the greeting must say so and
+  point at "Run workflow" — a bot that looks broken for two hours is worse
+  than one that admits it is slow.
 
 ## Current architecture
 
 Two runtime paths matter:
 
-1. **GitHub Actions scanner** (every 15 min) — one run does both jobs:
+1. **GitHub Actions scanner** (cron asks for 15 min, GitHub gives ~2 h) —
+   one run does both jobs:
    `main.py -> getUpdates (CommandRouter) -> pipeline -> sources -> filters -> dedup -> scoring -> Telegram`
 2. **Streamlit dashboard** — reads Turso and edits `chat_configs`
 
 There is deliberately **no always-on server**. Commands are polled once per
-run, which is why replies take up to 15 minutes. That trade-off is the whole
-reason the project costs nothing to operate — do not "fix" it by adding a
-hosted webhook without being asked.
+run, which is why replies are slow. That trade-off is the whole reason the
+project costs nothing to operate — do not "fix" it by adding a hosted webhook
+without being asked.
+
+Do not re-tighten the cron either. `*/15` was already tried and GitHub simply
+dropped 87% of the runs; asking more often does not get more. The minutes are
+offset off `:00` on purpose (GitHub's busiest moment) — keep them offset.
 
 Shared state lives in Turso/SQLite:
 

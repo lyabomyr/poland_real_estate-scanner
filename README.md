@@ -3,8 +3,8 @@
 Scanner for buying apartments in Kraków under a fixed budget. Two runtime
 pieces:
 
-1. **GitHub Actions scanner** — runs every 15 minutes. Each run sends fresh
-   matches *and* answers any Telegram commands received since the last run.
+1. **GitHub Actions scanner** — runs on a cron. Each run sends fresh matches
+   *and* answers any Telegram commands received since the last one.
 2. **Streamlit dashboard** — read-only analytics plus per-chat override
    editing.
 
@@ -14,10 +14,18 @@ driver — see [`scanner/turso_http.py`](scanner/turso_http.py)).
 local-database fallback, so the scanner, the bot and the dashboard always
 read the same rows.
 
-> ⏱ **Bot replies take up to 15 minutes.** Commands are read by the scheduled
-> scan, not by an always-on server, so a message sent at 12:01 is answered by
-> the run that starts at 12:15. Nothing is lost — it just isn't instant. Hit
-> **Actions → scan → Run workflow** when you want an immediate answer.
+> ⏱ **Replies are not instant — often an hour or two.** Commands are read by
+> the scheduled scan, not by an always-on server.
+>
+> The cron asks for every 15 minutes and does not get it. GitHub throttles
+> scheduled workflows on free runners and drops most of them: measured over
+> 24 hours on this repo, **14 runs, average gap 115 minutes, worst 226**. The
+> cron minutes are offset off `:00` because that is GitHub's busiest moment,
+> which helps a little — it does not make the schedule reliable.
+>
+> Nothing is lost when a run is skipped: what to send is read from the
+> database, so the next run resumes. But if you want an answer *now*, hit
+> **Actions → scan → Run workflow** — manual dispatch is not throttled.
 
 ## Current architecture
 
@@ -329,7 +337,7 @@ would otherwise have processed.
 
 [`scan.yml`](.github/workflows/scan.yml) runs:
 
-- every 15 minutes on cron (GitHub may delay by 5-15 min at peak)
+- on cron, nominally every 15 min; in practice ~2 h (GitHub throttling)
 - manually from the Actions UI — use this for an immediate scan/reply
 
 [`prune.yml`](.github/workflows/prune.yml) runs monthly and archives old
@@ -386,7 +394,7 @@ make dry
 
 ```text
 main.py                        CLI + wiring
-.github/workflows/scan.yml     cron: scan + drain commands (every 15 min)
+.github/workflows/scan.yml     cron: scan + drain commands (~2 h in practice)
 .github/workflows/prune.yml    cron: archive old rejected rows (monthly)
 dashboard/                     Streamlit app
 scanner/

@@ -1,10 +1,14 @@
 """Telegram command routing.
 
 Commands are read by **polling**: the scanner calls ``getUpdates`` once per
-run, so a command sent at 12:01 is answered by the run that starts at 12:15.
-Replies therefore take **up to 15 minutes** — that is the scheduling
-interval, not slow code. Users are told this in :meth:`CommandRouter._cmd_help`
-and in the greeting, because otherwise a silent bot looks broken.
+scheduled run, so a reply waits for the next one.
+
+That is not 15 minutes. The cron asks for every 15 min; GitHub throttles
+free scheduled workflows and drops most of them — measured over 24h on this
+repo, the average gap between runs was 115 minutes and the worst was 226.
+:meth:`CommandRouter._cmd_help` and the greeting say so honestly, and point
+at "Run workflow" for an immediate answer, because a bot that looks broken
+for two hours is worse than a bot that says it will be slow.
 
 Mutations (``/max_price``, ``/kw``, ``/source`` …) land in ``chat_configs``
 in the same run that answers them, so the very same scan already applies the
@@ -156,10 +160,13 @@ class CommandRouter:
 
     def _cmd_help(self) -> List[BotReply]:
         lines = [
-            "⏱ <b>Replies take up to 15 minutes.</b>",
-            "The bot reads commands during its scheduled scan, which runs "
-            "every 15 min — so your message waits for the next run. Nothing "
-            "is lost, it just isn't instant.",
+            "⏱ <b>Replies are not instant — often an hour or two.</b>",
+            "The bot reads commands during its scheduled scan. The schedule "
+            "asks for every 15 min, but GitHub throttles free scheduled runs "
+            "hard: measured, the real gap averages ~2 hours. Nothing is lost "
+            "— your command is queued and answered by the next run.",
+            "Want an answer now? Trigger a run yourself: GitHub → Actions → "
+            "scan → <b>Run workflow</b>. Manual runs are not throttled.",
             "",
             "<b>Commands</b>",
             "/status — short summary for this chat",

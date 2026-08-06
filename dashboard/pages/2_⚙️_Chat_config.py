@@ -36,7 +36,8 @@ if not render_connection_status():
 st.markdown(
     "Values below are what the scanner **will actually use** for the selected "
     "chat. Anything not overridden here comes from `config.yml` — the shared "
-    "baseline every chat inherits. Changes apply on the next scan (≤ 15 min)."
+    "baseline every chat inherits. Changes apply on the next scan — usually an "
+    "hour or two, since GitHub throttles the schedule."
 )
 
 chats = load_chats()
@@ -318,7 +319,7 @@ if col_save.button("💾 Save", type="primary"):
         paused=paused,
     )
     upsert_chat_override(picked, row.title, new_override)
-    st.success("Saved. The next scan (≤ 15 min) picks this up.")
+    st.success("Saved. The next scan picks this up — usually within an hour or two.")
     st.rerun()
 
 if col_reset.button("↩️ Reset to defaults"):

@@ -20,7 +20,7 @@ st.set_page_config(page_title="Kraków flats — scanner", page_icon="🏢", lay
 st.title("🏢 Flat scanner — overview")
 st.caption(
     "Live read from Turso — the same database the scanner writes to. Updated "
-    "on every scan (\\*/15 min), cached in the UI for 60 s."
+    "on every scan (~2 h — GitHub throttles the cron), cached here for 60 s."
 )
 
 if not render_connection_status():

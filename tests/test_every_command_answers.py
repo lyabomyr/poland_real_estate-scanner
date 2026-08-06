@@ -112,3 +112,41 @@ class EveryCommandAnswersTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LatencyIsStatedHonestlyTests(unittest.TestCase):
+    """The bot must not promise a schedule GitHub does not honour.
+
+    The cron asks for every 15 minutes. Measured over 24 h: 14 runs, average
+    gap 115 minutes, worst 226 — GitHub throttles free scheduled workflows and
+    drops most of them. Promising "up to 15 minutes" made a working bot look
+    broken for two hours, which is the one thing worse than being slow.
+    """
+
+    def setUp(self) -> None:
+        cfg = yaml.safe_load(_CONFIG.read_text())
+        repo = MagicMock()
+        repo.get.return_value = None
+        self.help_text = CommandRouter("123:TEST", repo, cfg)._cmd_help()[0].text
+
+    def test_help_does_not_promise_fifteen_minutes(self) -> None:
+        self.assertNotIn("up to 15 minutes", self.help_text)
+        self.assertNotIn("within 15 min", self.help_text)
+
+    def test_help_says_replies_are_slow_and_why(self) -> None:
+        lowered = self.help_text.lower()
+        self.assertIn("not instant", lowered)
+        self.assertIn("throttle", lowered)
+
+    def test_help_offers_the_way_to_get_an_answer_now(self) -> None:
+        """Telling someone to wait without an escape hatch is not help."""
+        self.assertIn("Run workflow", self.help_text)
+
+    def test_the_cron_stays_off_the_top_of_the_hour(self) -> None:
+        """:00 is GitHub's busiest minute and the likeliest to be dropped."""
+        workflow = (Path(__file__).resolve().parent.parent
+                    / ".github" / "workflows" / "scan.yml").read_text()
+        cron = [l for l in workflow.splitlines() if "- cron:" in l][0]
+        minutes = cron.split('"')[1].split()[0]
+        self.assertNotIn("*/", minutes, "*/N always includes :00")
+        self.assertNotIn("0,", f"{minutes},", "must not fire at :00")

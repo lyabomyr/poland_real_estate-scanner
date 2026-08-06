@@ -4,12 +4,24 @@ name: scan
 #   1. drains pending Telegram commands via getUpdates
 #   2. scans every enabled chat's sources and sends new matches
 #
-# Because commands are only read here, a bot reply can take up to one
-# interval (15 min). That's the schedule, not slow code — the /help text
-# says so explicitly. Use "Run workflow" for an immediate run.
+# Because commands are only read here, a reply waits for the next run.
+#
+# HOW OFTEN THIS ACTUALLY RUNS — not what the cron says.
+# GitHub heavily throttles scheduled workflows on free runners and simply
+# drops the rest. Measured over 24h on this repo: 14 runs, average gap
+# 115 minutes, worst 226. The cron below asks for 96 runs a day and gets
+# roughly 12. Nothing is lost when a run is skipped — the delivery backlog
+# means the next one resumes — but a bot reply can genuinely take hours.
+#
+# The minutes are offset on purpose. GitHub's own guidance is to avoid the
+# start of the hour, which is its busiest moment; "*/15" fires at :00 and
+# competes with everything else on the platform.
+#
+# Use "Run workflow" (workflow_dispatch) when you want an answer now — a
+# manual dispatch is not throttled.
 on:
   schedule:
-    - cron: "*/15 * * * *"   # GitHub may delay by 5-15 min in peak hours
+    - cron: "7,22,37,52 * * * *"   # offset off :00 — see the note above
   workflow_dispatch:
 
 concurrency:
